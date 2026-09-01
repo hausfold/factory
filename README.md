@@ -66,8 +66,9 @@ per event on stdout while the human log stays human.
 
 One file, machine-local, at `factory config path`
 (`~/.config/factory/config.json`, or `$FACTORY_CONFIG`). `factory config print`
-shows the **effective** policy — your file merged over the defaults — so you can
-always tell *unset* from *set to the default*.
+shows the **effective** policy — your file merged over the defaults, plus the
+floor below them that no config can lower — so what it prints is what
+`factory tier` will actually do.
 
 ```json
 {
