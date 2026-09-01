@@ -78,7 +78,7 @@ grant)
   # A live lease always has a watchdog, and it is started HERE rather than by
   # the foreman so the invariant is structural: the one thing that must not
   # depend on the agent still working is the thing that notices it stopped.
-  # `ensure` is idempotent (one pidfile per machine, claimed O_EXCL), so a
+  # `ensure` is idempotent (one pidfile per machine, claimed by hardlink), so a
   # second grant inside a live shift extends the lease without racing — and it
   # is the same verb the foreman re-runs each wakeup, so there is one
   # implementation of "make sure something is watching".

@@ -438,10 +438,37 @@ EOF
   [ ! -f "$FACTORY_STATE_DIR/watchdog.pid" ]
 }
 
+@test "⚠ a claim it could not write publishes nothing, not an empty pidfile" {
+  # An empty pidfile is not inert. `poller_pid` reads it as nothing-alive, so
+  # the next `run` deletes it and claims it — and if what it deleted was a live
+  # poller's claim caught mid-write, that is a duplicate poller started on top
+  # of one, which `revoke` cannot stop because it only ever stops the pid the
+  # file names. So the claim writes the pid to a private name and hardlinks it
+  # into place: `watchdog.pid` never exists while empty.
+  #
+  # The window itself is one preemption between a create and a write, which no
+  # suite can schedule. A write that CANNOT land makes the same claim testable:
+  # either the pid is published or nothing is. Under an O_EXCL create the file
+  # is created before the write that fails, and the leftover is what the next
+  # `run` would evict a live poller over.
+  # The lease is EXPIRED on purpose. The claim runs before any lease is read,
+  # so nothing here is weakened by it — but a regression that wrongly claims
+  # then finds nothing to watch and exits, where a live lease would leave it
+  # polling and HANG this case rather than fail it.
+  lease -600 43200
+  log_aged 7200
+  run bash -c 'ulimit -f 0 2>/dev/null || exit 111; exec "$1" run' _ "$WD"
+  [ "$status" -ne 111 ] || skip "this shell cannot set RLIMIT_FSIZE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not claim"* ]]
+  [ ! -e "$FACTORY_STATE_DIR/watchdog.pid" ]
+}
+
 @test "⚠ two simultaneous grants leave exactly one poller" {
-  # The pidfile is claimed with an O_EXCL create, not a read-then-write: the
-  # loser of a read-then-write became an orphan `revoke` could not see, still
-  # holding a trap that would delete its successor's pidfile.
+  # The pidfile is claimed by hardlinking a file that already holds the pid,
+  # not by a read-then-write: the loser of a read-then-write became an orphan
+  # `revoke` could not see, still holding a trap that would delete its
+  # successor's pidfile.
   #
   # Counted over the three pids started here, and WAITED for rather than slept
   # at. The fixed second this used to take assumed the losers had already
