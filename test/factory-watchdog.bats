@@ -55,15 +55,26 @@ printf '%s\n' "$*" >>"$TRILL_CALLS"
 EOF
   chmod +x "$TMP/bin/trill"
   FAKE_PID=""
+  RACERS=""
 }
 
 teardown() {
   [ -z "$FAKE_PID" ] || kill "$FAKE_PID" 2>/dev/null || true
+  # The race case starts pollers that are deliberately NOT the pidfile's — two
+  # of the three are meant to lose it — so the pidfile alone cannot reap them.
+  # A regression there means a poller that outlives its test and goes on
+  # polling the runner underneath every case after it.
+  local p
+  for p in $RACERS; do
+    case "$(ps -p "$p" -o command= 2>/dev/null)" in
+    *factory-watchdog\ run) kill "$p" 2>/dev/null || true ;;
+    esac
+  done
   # Guarded the same way the script guards, and for the same reason: one case
   # below deliberately parks bats' OWN pid in that file, and a teardown that
   # trusted it would take the test runner down with it.
   if [ -s "$FACTORY_STATE_DIR/watchdog.pid" ]; then
-    local p; p=$(cat "$FACTORY_STATE_DIR/watchdog.pid")
+    p=$(cat "$FACTORY_STATE_DIR/watchdog.pid")
     case "$(ps -p "$p" -o command= 2>/dev/null)" in
     *factory-watchdog\ run) kill "$p" 2>/dev/null || true ;;
     esac
@@ -109,6 +120,37 @@ until_ok() {
     sleep 0.1; i=$((i + 1))
   done
   return 1
+}
+
+# How many of the NAMED pids are live pollers — never a `pgrep -f
+# "factory-watchdog run"` over the process table, which is a different and
+# wrong question. A poller forks a subshell for every command substitution in
+# its loop, and a forked child inherits its parent's argv verbatim: `quiet=$(
+# check "$slept")` alone runs a whole `factory-lease` and a `jq` while a second
+# process with a byte-identical command line sits in the table. Any pattern
+# match sampling that instant counts the one correct poller twice. That phantom
+# is what made the race case below fail on a loaded runner while the claim it
+# tests was doing exactly the right thing — and it fired more often the busier
+# the machine, because the fork lives for as long as the poll takes.
+#
+# Asking `ps` about a pid we started answers the question the case actually
+# has: of the processes THIS test spawned, how many are still pollers.
+pollers_alive() {
+  local pid n=0
+  for pid in "$@"; do
+    case "$(ps -p "$pid" -o command= 2>/dev/null)" in
+    *factory-watchdog\ run) n=$((n + 1)) ;;
+    esac
+  done
+  printf '%s\n' "$n"
+}
+
+# The predicate form, because `until_ok` re-runs its argv: a `$(pollers_alive
+# ...)` written into until_ok's own arguments would be expanded once, before
+# the first attempt, and every retry would re-test the first answer.
+poller_count_is() {
+  local want="$1"; shift
+  [ "$(pollers_alive "$@")" -eq "$want" ]
 }
 
 # ── nothing to watch ──────────────────────────────────────────────────────────
@@ -400,15 +442,29 @@ EOF
   # The pidfile is claimed with an O_EXCL create, not a read-then-write: the
   # loser of a read-then-write became an orphan `revoke` could not see, still
   # holding a trap that would delete its successor's pidfile.
+  #
+  # Counted over the three pids started here, and WAITED for rather than slept
+  # at. The fixed second this used to take assumed the losers had already
+  # exited, which a loaded runner need not honour; the count can only ever
+  # FALL, since nothing here starts a fourth, so "reaches one" and "settles at
+  # one" are the same statement. Two pollers that stay alive — the bug this
+  # case exists for — still fail it, after `until_ok` has given them 25s.
   unset FACTORY_NO_WATCHDOG
   lease 21600 60
   log_aged 30
-  "$WD" run >/dev/null 2>&1 &
-  "$WD" run >/dev/null 2>&1 &
-  "$WD" run >/dev/null 2>&1 &
+  local owner
+  "$WD" run >/dev/null 2>&1 & RACERS="$!"
+  "$WD" run >/dev/null 2>&1 & RACERS="$RACERS $!"
+  "$WD" run >/dev/null 2>&1 & RACERS="$RACERS $!"
   until_ok test -s "$FACTORY_STATE_DIR/watchdog.pid"
-  sleep 1
-  [ "$(pgrep -f "factory-watchdog run" | wc -l | tr -d ' ')" -eq 1 ]
+  until_ok poller_count_is 1 $RACERS
+  # And the survivor is the one the pidfile names, with the file still there: a
+  # loser exiting on the old read-then-write held a trap that deleted its
+  # successor's pidfile, which leaves exactly one poller and no claim on it.
+  [ -s "$FACTORY_STATE_DIR/watchdog.pid" ]
+  owner=$(cat "$FACTORY_STATE_DIR/watchdog.pid")
+  poller_count_is 1 "$owner"
+  case " $RACERS " in *" $owner "*) ;; *) false ;; esac
 }
 
 @test "grant starts a poller and revoke stops it" {
