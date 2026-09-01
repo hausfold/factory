@@ -161,7 +161,12 @@ cmd_config() {
       ui_table_clear
       ui_col label 4 1 muted
       ui_col value 20 1 body
-      while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done < <(
+      # Into a variable first, and NOT through a process substitution: a
+      # process substitution's exit status is unreachable, so a jq that failed
+      # would print an empty table and exit 0. Silence is a claim here, and a
+      # config nobody could read must not look like a config with nothing in it.
+      local rows
+      rows="$(
         printf '%s\n' "$FACTORY_CFG" |
           jq -r --argjson floor "$FACTORY_FLOOR_DENY" --arg p "$FACTORY_CONFIG_PATH" --arg d "$(factory_policy_digest)" '
             "config\t\($p)",
@@ -174,7 +179,8 @@ cmd_config() {
             "after\t\(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
             "notify\t\(.notify.mode), source \(.notify.source)",
             "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
-      )
+      )"
+      while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done <<<"$rows"
       ui_table_data
     fi
     ;;

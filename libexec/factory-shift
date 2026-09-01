@@ -60,7 +60,7 @@ done
 # Human line to the log always; stdout carries whichever shape the caller asked
 # for. The log is never JSON: it is the artifact a person reads in the morning,
 # and one artifact that two readers disagree about is worse than two.
-say() { # say <json-or-empty> <human line> [ok|warn|err|muted]
+say() { # say <json-or-empty> <human line> [ok|warn|err|url|muted]
   printf '%s %s\n' "$(date '+%H:%M')" "$2" >>"$LOG"
   if [ "$json" = 1 ]; then
     [ -z "$1" ] || printf '%s\n' "$1"
@@ -71,10 +71,14 @@ say() { # say <json-or-empty> <human line> [ok|warn|err|muted]
     # ⚠, and only a merge gets a ✓ — a log where every line is marked is a log
     # with no marks in it.
     case "${3:-muted}" in
-    ok)   out_ok   "$2" ;;
-    warn) out_warn "$2" ;;
-    err)  out_bad  "$2" ;;
-    *)    out_info "$2" ;;
+    ok)   out_ok      "$2" ;;
+    warn) out_warn    "$2" ;;
+    err)  out_bad     "$2" ;;
+    # A line whose payload is a URL. Same mark as `err`, no folding: the run URL
+    # is one unbreakable token and a narrow window would otherwise cut it in
+    # half, which costs the foreman the only thing that line is carrying.
+    url)  out_bad_url "$2" ;;
+    *)    out_info    "$2" ;;
     esac
   fi
 }
@@ -357,7 +361,7 @@ for repo in $repos; do
     case "${conclusion:-}" in
     failure | timed_out | startup_failure)
       say "$(J --arg r "$repo" --arg u "$url" --arg c "$conclusion" \
-        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url" err
+        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url" url
       notify fault "CI red on $repo $base" "$url"
       ;;
     esac

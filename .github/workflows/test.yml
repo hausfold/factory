@@ -58,12 +58,26 @@ jobs:
       # file, not the binary and not Nix. Without it they `skip`, which would
       # leave the painted contract unexercised on the one machine that runs
       # this on every push.
+      #
+      # At the REV flake.lock pins, never the default branch. Taking snug's main
+      # would red a factory PR that touched nothing the day snug changes a
+      # contract, and — worse in the other direction — would leave the rev this
+      # tool actually ships against never exercised.
+      - name: resolve snug's pinned rev
+        id: snug
+        run: echo "rev=$(jq -r '.nodes.snug.locked.rev' flake.lock)" >>"$GITHUB_OUTPUT"
+
       - name: check out snug (the presentation runtime)
         uses: actions/checkout@v4
         with:
           repository: hausfold/snug
+          ref: ${{ steps.snug.outputs.rev }}
           path: .snug
 
+      # Exported for the WHOLE suite, not just the presentation cases: shipped,
+      # every report is painted, so that is the shape the other 86 cases should
+      # be reading. `test/presentation.bats` unsets it inside its own setup, so
+      # its no-painter cases still test the degraded path.
       - name: bats
         run: |
           bats --version

@@ -56,20 +56,35 @@ FACTORY_MARK_INFO='·'
 if [ -z "$UI_READY" ]; then
   # The one shape snug's budget gives a stream with no window: every column at
   # its natural width, nothing cut and nothing painted. factory's reports are
-  # two columns wide — a mark and a line — so that is a join, not a layout.
-  declare -ga UI__TROWS=()
+  # two columns wide — a label and a value — so the whole layout is: measure the
+  # first column, pad to it.
+  #
+  # ⚠️ `declare -g` is bash 4.2 and this file is the degraded path for a Mac's
+  # own `/bin/bash` 3.2 — the clone-and-symlink install with no Nix, which is
+  # the one install this fallback exists for. A bare assignment is global here
+  # anyway: `ui.sh` is sourced at the top of `bin/factory` before any function
+  # runs, and nothing below declares these `local`.
+  UI__TROWS=()
+  UI_FOLD=()
   ui_col() { :; }
   ui_cell() { printf -v "$1" '%s' "$3"; }
   ui_trow() { local IFS=$'\t'; UI__TROWS+=("$*"); }
   ui_table_clear() { UI__TROWS=(); }
   ui_table_data() {
-    local r
-    for r in ${UI__TROWS[@]+"${UI__TROWS[@]}"}; do printf '%s\n' "${r//$'\t'/  }"; done
+    local r head rest w=0
+    for r in ${UI__TROWS[@]+"${UI__TROWS[@]}"}; do
+      head="${r%%$'\t'*}"
+      [ "${#head}" -gt "$w" ] && w="${#head}"
+    done
+    for r in ${UI__TROWS[@]+"${UI__TROWS[@]}"}; do
+      head="${r%%$'\t'*}"; rest="${r#*$'\t'}"
+      if [ "$rest" = "$r" ]; then printf '   %s\n' "$head"
+      else printf '   %-*s  %s\n' "$w" "$head" "${rest//$'\t'/  }"; fi
+    done
     UI__TROWS=()
   }
   ui_paint_role() { printf -v "$1" '%s' "$3"; }
   ui_fold() { UI_FOLD=("$2"); }
-  declare -ga UI_FOLD=()
 fi
 
 # out <role> <mark> <text> — one report line on fd 1, folded to fd 1's window.
@@ -91,10 +106,24 @@ out() {
   return 0
 }
 
+# out_line <role> <mark> <text> — the same line, NOT folded.
+#
+# For a line whose payload is one unbreakable token: snug's `ui_fold` hard-cuts
+# a word longer than the budget, so a CI failure's URL comes out split across a
+# hanging indent, unclickable and no longer the one-line shape the foreman's
+# skill reads. A terminal's own wrap keeps the token contiguous in the buffer,
+# which is the better failure at 60 columns.
+out_line() {
+  local painted
+  ui_paint_role painted "$1" "$2" UI_OUT_
+  printf '%s  %s\n' "$painted" "$3"
+}
+
 out_ok()   { out ok    "$FACTORY_MARK_OK"   "$*"; }
 out_warn() { out warn  "$FACTORY_MARK_WARN" "$*"; }
 out_bad()  { out err   "$FACTORY_MARK_BAD"  "$*"; }
 out_info() { out muted "$FACTORY_MARK_INFO" "$*"; }
+out_bad_url() { out_line err "$FACTORY_MARK_BAD" "$*"; }
 
 # out_head <text> — a section head on fd 1: no mark, so its text starts in the
 # same column a mark would, and the rows under it hang off it.

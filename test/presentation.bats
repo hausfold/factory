@@ -12,6 +12,15 @@ bats_require_minimum_version 1.5.0   # `run --separate-stderr`, which the two-st
 setup() {
   ROOT="$BATS_TEST_DIRNAME/.."
   FACTORY="$ROOT/bin/factory"
+  # Isolated like every other suite here, and for a sharper reason: these cases
+  # read `lease status`, and the machine running them is the one this tool grants
+  # leases on. Without this, `bats test/` reds three cases on a developer's Mac
+  # mid-shift — a live 12h lease, i.e. the tool doing exactly its job — and reds
+  # nowhere else, so it reads as a regression that CI cannot reproduce.
+  export FACTORY_STATE_DIR="$BATS_TEST_TMPDIR/state"
+  export FACTORY_CONFIG="$BATS_TEST_TMPDIR/config.json"
+  mkdir -p "$FACTORY_STATE_DIR"
+  export FACTORY_NO_WATCHDOG=1
   # snug's bash half, off the store path of whatever `snug` is on PATH. Absent
   # in a bare checkout, which is what the `skip`s below are for — the ban and
   # the degradation still run there, and those are the half that can rot
@@ -21,11 +30,20 @@ setup() {
   # because "the ui.sh I am changing" is the whole reason to set it.
   UI_SH="${FACTORY_UI_SH:-}"
   [ -n "$UI_SH" ] && [ -r "$UI_SH" ] || UI_SH=""
+  # Then the checkout CI makes at the rev flake.lock pins — the ui.sh this tool
+  # actually ships against.
+  [ -n "$UI_SH" ] || { [ -r "$ROOT/.snug/share/ui.sh" ] && UI_SH="$ROOT/.snug/share/ui.sh"; }
+  # Last, whatever `snug` is on PATH. ⚠️ On a haus machine that is HAUS's pin,
+  # not factory's, so a green run here is not proof against the rev in
+  # flake.lock. CI is where that proof lives.
   if [ -z "$UI_SH" ] && command -v snug >/dev/null 2>&1; then
     local p
     p="$(cd "$(dirname "$(command -v snug)")/.." && pwd)/share/ui.sh"
     [ -r "$p" ] && UI_SH="$p"
   fi
+  # The suite must never inherit the ambient one — several cases are about what
+  # happens with NO painter, and `run env -u` only covers the child.
+  unset FACTORY_UI_SH
 }
 
 # ── the ban ───────────────────────────────────────────────────────────────────
@@ -36,11 +54,26 @@ setup() {
 # all — which makes the blanket ban cheaper to keep than a colour-only one that
 # has to be argued about per line.
 @test "no literal escape anywhere in the shipped shell" {
-  run grep -rlP '\x1b|\\033|\\x1b|\\e\[' "$ROOT/bin" "$ROOT/libexec" "$ROOT/lib"
+  # POSIX ERE, not `grep -P`. BSD grep has no -P and exits 2 on it — which is
+  # non-zero, so the assertion below would PASS without having read a file. A
+  # ban that goes green because the tool refused to run is the drift shape this
+  # repo's own portability rule exists to stop.
+  local esc; esc="$(printf '\033')"
+  run grep -rlE "$esc"'|\\033|\\x1b|\\e\[' "$ROOT/bin" "$ROOT/libexec" "$ROOT/lib"
   [ "$status" -ne 0 ] || {
     echo "escapes in: $output" >&2
     false
   }
+}
+
+@test "the escape ban can actually see an escape" {
+  # The ban above is a negative assertion, so nothing in it fails when the
+  # search itself is broken. This is the positive half: plant one and find it.
+  local esc; esc="$(printf '\033')"
+  printf 'x=%s[31m\n' "$esc" >"$BATS_TEST_TMPDIR/planted.sh"
+  run grep -rlE "$esc"'|\\033|\\x1b|\\e\[' "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *planted.sh* ]]
 }
 
 @test "no hand-picked 256-colour index" {
