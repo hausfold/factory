@@ -234,21 +234,45 @@ once | ensure)
   exit "$rc"
   ;;
 run)
-  # One watchdog per machine, claimed with an O_EXCL create rather than a
-  # read-then-write: two `grant`s in the same instant both passed the old check,
-  # and the loser became an orphan `revoke` could not see — still holding a trap
-  # that would delete its successor's pidfile.
+  # One watchdog per machine, claimed by writing the pid to a private name and
+  # HARD-LINKING that into place: `ln` fails when the name is taken, which is
+  # the same exclusion an O_EXCL create gives, but the file holds the pid
+  # before it has the shared name. Neither a read-then-write nor an O_EXCL
+  # create manages that. The read-then-write let two `grant`s in the same
+  # instant both pass the check, and the loser became an orphan `revoke` could
+  # not see — still holding a trap that would delete its successor's pidfile.
+  # O_EXCL closed that and left a narrower door open: exclusive is not atomic,
+  # so the pidfile exists EMPTY between the create and the write, and an empty
+  # pidfile is exactly what the recovery below reads as a crashed poller's. A
+  # racer landing in that window deleted a live poller's claim and started a
+  # duplicate on top of it.
+  #
+  # Which makes the recovery's reading true rather than merely usual: nothing
+  # here can now publish an empty pidfile, so one found empty really is
+  # wreckage. `[ -s "$mine" ]` is what earns that — a claim that could not
+  # write its own pid must publish nothing at all, rather than link an empty
+  # file into place and leave the next `run` the same window to fall into.
+  #
+  # `$mine` is litter if this process is SIGKILLed between the write and the
+  # rm, and deliberately never swept: a sweep would race the in-flight write of
+  # every OTHER racer, which is the bug again with more steps. It is one empty
+  # file, and the next claim by that pid truncates it.
   claimed=0
-  if (set -C; printf '%s\n' "$$" >"$PIDFILE") 2>/dev/null; then
-    claimed=1
-  elif pid=$(poller_pid); then
-    echo "watchdog: already running (pid $pid)"
-    exit 0
-  else
-    # The file exists and names nothing alive — a crash or a reboot. Take it.
-    rm -f "$PIDFILE"
-    if (set -C; printf '%s\n' "$$" >"$PIDFILE") 2>/dev/null; then claimed=1; fi
+  mine="$PIDFILE.$$"
+  if (printf '%s\n' "$$" >"$mine") 2>/dev/null && [ -s "$mine" ]; then
+    if ln "$mine" "$PIDFILE" 2>/dev/null; then
+      claimed=1
+    elif pid=$(poller_pid); then
+      echo "watchdog: already running (pid $pid)"
+      rm -f "$mine"
+      exit 0
+    else
+      # The file exists and names nothing alive — a crash or a reboot. Take it.
+      rm -f "$PIDFILE"
+      if ln "$mine" "$PIDFILE" 2>/dev/null; then claimed=1; fi
+    fi
   fi
+  rm -f "$mine"
   [ "$claimed" = 1 ] || { echo "watchdog: could not claim $PIDFILE" >&2; exit 1; }
   # Only ever remove a pidfile that is still OURS, so a poller exiting late
   # cannot delete the successor's.
