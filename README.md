@@ -201,9 +201,13 @@ reset however much is left. Asking instead whether a lane *still leaves enough
 to finish the week* forgives the burst and keeps the bound.
 
 **Every arm that could not do the arithmetic ends `fixer: no (budget unknown)`.**
-A missing feed, a column reorder upstream, a value that is not digits, a reset
-stamp absent or further out than the week it names. An unknown budget is not
-permission, for the same reason `ci-unknown` is not a green branch.
+A missing feed, a column reorder upstream, a value that is not digits, either
+reset stamp absent, already passed, or further out than the window it names. A
+stamp is what makes the percentage beside it a claim about *now*: a feed that
+stopped hours ago still parses, and its `5-hour %` is then a rolled-over window
+read as live spend — by the condition that outranks the other one. An unknown
+budget is not permission, for the same reason `ci-unknown` is not a green
+branch.
 
 No quota to count? `"budget": {"mode": "unmetered"}` says so out loud, and the
 log says it too — so a feed that merely went missing can never be mistaken for a
