@@ -55,8 +55,7 @@ case "$repo" in
   if [ "$(jq length <<<"$orgs")" = 1 ]; then
     repo="$(jq -r '.[0]' <<<"$orgs")/$repo"
   else
-    echo "factory: '$repo' has no owner and scope.orgs does not name exactly one org" >&2
-    exit 2
+    die "'$repo' has no owner and scope.orgs does not name exactly one org"
   fi
   ;;
 esac
@@ -66,7 +65,10 @@ no() { # no <reason>
     jq -nc --arg repo "$repo" --argjson num "$num" --arg reason "$1" \
       '{tier: null, repo: $repo, number: $num, head: null, reason: $reason}'
   else
-    echo "tier: not-1 — $1  ($repo#$num)"
+    # `·` and not `⚠`: most pull requests are not tier 1, and that is the
+    # filter working. A warning mark on the ordinary answer teaches the eye to
+    # skip the mark, which is the one thing the ⚠ on a real refusal needs.
+    out_info "tier: not-1 — $1  ($repo#$num)"
   fi
   exit 3
 }
@@ -108,7 +110,7 @@ if [ "$paths_only" = 1 ]; then
     jq -nc --arg repo "$repo" --argjson num "$num" --argjson n "$count" \
       '{tier: 1, repo: $repo, number: $num, files: $n, pathsOnly: true}'
   else
-    echo "tier: paths ok ($repo#$num)"
+    out_ok "tier: paths ok ($repo#$num)"
   fi
   exit 0
 fi
@@ -169,5 +171,5 @@ if [ "$json" = 1 ]; then
     --argjson files "$count" --argjson lines "$churn" \
     '{tier: 1, repo: $repo, number: $num, head: $head, files: $files, lines: $lines, reason: null}'
 else
-  echo "tier: 1 ($repo#$num · $count files, $churn lines) head=$head_sha"
+  out_ok "tier: 1 ($repo#$num · $count files, $churn lines) head=$head_sha"
 fi

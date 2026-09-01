@@ -16,7 +16,7 @@ could not see, a foreman that died — every one of them leaves your PRs exactly
 where they are today: open, waiting for you.
 
 ```sh
-brew install jq gh          # the only two dependencies
+brew install jq gh          # the only two REQUIRED dependencies
 git clone https://github.com/hausfold/factory ~/.local/share/factory
 ln -s ~/.local/share/factory/bin/factory /usr/local/bin/factory
 
@@ -280,11 +280,29 @@ end of the shift unless the watchdog is running. Both halves are needed.
 - **It does not run headless.** A merge nobody is awake to notice is the thing
   the watchdog exists to prevent, not a feature.
 
+## How it looks on screen
+
+Every report — `doctor`'s checklist, `tier`'s verdict, `lease status`, every
+line of a `shift` — draws on **stdout**, marked `✓ ⚠ ✗ ·`, so
+`factory shift >> nightly.log` comes out whole. Errors are the only thing on
+stderr. Colour comes from [snug](https://github.com/hausfold/snug), the
+family's presentation runtime: `lib/ui.sh` sources snug's `share/ui.sh` from
+`$FACTORY_UI_SH` when that names a readable file, which the Nix package sets
+for you.
+
+**snug is an input, not a dependency.** The clone-and-symlink install above has
+no `FACTORY_UI_SH` and prints the same reports with the same marks, unpainted.
+`NO_COLOR`, a pipe and `TERM=dumb` each turn the colour off; `CLICOLOR_FORCE=1`
+turns it on for a pipe, and `dumb` beats even that.
+
 ## Development
 
 ```sh
-bats test/                                    # 87 cases
+bats test/                                    # 98 cases
 shellcheck bin/factory libexec/* lib/*.sh
+
+# The presentation cases need snug's bash half; without it they skip.
+FACTORY_UI_SH=/path/to/snug/share/ui.sh bats test/
 ```
 
 MIT. Part of the [hausfold](https://github.com/hausfold) family — the layer

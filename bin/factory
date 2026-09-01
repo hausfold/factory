@@ -14,6 +14,11 @@ set -euo pipefail
 FACTORY_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export FACTORY_HOME
 LIBEXEC="$FACTORY_HOME/libexec"
+# Presentation only — the report verbs and snug's painter behind them. NOT
+# common.sh: that reads the config and requires `jq` at source time, and
+# `factory --help` must work on a machine that has neither.
+# shellcheck source=lib/ui.sh
+. "$FACTORY_HOME/lib/ui.sh"
 
 usage() {
   cat <<'EOF'
@@ -69,12 +74,12 @@ cmd_skill() {
   case "$sub" in
   "") : ;;
   install) shift; cmd_skill_install "$@"; return ;;
-  -*) echo "factory: skill takes a name or 'install', not '$sub'" >&2; exit 2 ;;
+  -*) die "skill takes a name or 'install', not '$sub'" ;;
   esac
   # A named skill is a sibling directory; the tool's own is `ai/SKILL.md`.
   local path="$FACTORY_HOME/ai/SKILL.md"
   [ -z "${1:-}" ] || path="$FACTORY_HOME/ai/$1/SKILL.md"
-  [ -f "$path" ] || { echo "factory: no such skill '${1:-factory}'" >&2; exit 2; }
+  [ -f "$path" ] || die "no such skill '${1:-factory}'"
   cat "$path"
 }
 
@@ -84,7 +89,7 @@ cmd_skill_install() {
     case "$1" in
     --dir) dir="${2:-}"; shift 2 ;;
     --client) client="${2:-}"; shift 2 ;;
-    *) echo "factory: unknown flag '$1'" >&2; exit 2 ;;
+    *) die "unknown flag '$1'" ;;
     esac
   done
   local -a targets=()
@@ -92,7 +97,7 @@ cmd_skill_install() {
     targets=("$dir")
   elif [ -n "$client" ]; then
     local d
-    d="$(client_dir "$client")" || { echo "factory: unknown client '$client'" >&2; exit 2; }
+    d="$(client_dir "$client")" || die "unknown client '$client'"
     targets=("$d")
   else
       local c d
@@ -101,7 +106,7 @@ cmd_skill_install() {
       [ -d "$(dirname "$d")" ] && targets+=("$d")
     done
   fi
-  [ "${#targets[@]}" -gt 0 ] || { echo "factory: no agent client found — name one with --client or --dir" >&2; exit 2; }
+  [ "${#targets[@]}" -gt 0 ] || die "no agent client found — name one with --client or --dir"
 
   # Every skill this tool ships, discovered rather than listed: a tool that
   # ships a second skill and installs only its first reaches no standalone user
@@ -116,27 +121,29 @@ cmd_skill_install() {
       # A haus machine has already installed this, as a read-only Nix symlink.
       # Say so, rather than making the user work it out from an EPERM.
       if [ -L "$t/$name" ] || [ -L "$dest" ]; then
-        echo "skipped $dest — a symlink, so something else manages it (on a haus machine, haus.ai.skill already did)"
+        out_info "skipped $dest — a symlink, so something else manages it (on a haus machine, haus.ai.skill already did)"
         skipped=$((skipped + 1)); continue
       fi
       if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
-        echo "skipped $dest — exists and differs; diff it against $src"
+        out_warn "skipped $dest — exists and differs; diff it against $src"
         skipped=$((skipped + 1)); continue
       fi
       mkdir -p "$(dirname "$dest")"
       cp "$src" "$dest"
-      echo "wrote $dest"
+      out_ok "wrote $dest"
       wrote=$((wrote + 1))
     done
   done
-  echo "skills: $wrote written, $skipped left alone"
+  out_info "skills: $wrote written, $skipped left alone"
 }
 
 cmd_config() {
   # shellcheck source=lib/common.sh
   . "$FACTORY_HOME/lib/common.sh"
   case "${1:-print}" in
-  path) echo "$FACTORY_CONFIG_PATH" ;;
+  # A path a caller captures — `cd "$(dirname "$(factory config path)")"` is the
+  # whole reason stdout carries data only. Never painted, never marked.
+  path) out_data "$FACTORY_CONFIG_PATH" ;;
   print)
     factory_load
     if [ "${2:-}" = "--json" ]; then
@@ -144,31 +151,42 @@ cmd_config() {
     else
       # The effective policy, defaults included, plus the floor the config
       # cannot lower — so what `print` shows is what `tier` will actually do.
-      printf '%s\n' "$FACTORY_CFG" |
-        jq -r --argjson floor "$FACTORY_FLOOR_DENY" --arg p "$FACTORY_CONFIG_PATH" --arg d "$(factory_policy_digest)" '
-          "config: \($p)",
-          "digest: \($d)",
-          "",
-          "scope    orgs \(.scope.orgs | join(", ") | if . == "" then "-" else . end)  repos \(.scope.repos | length)  excluded \(.scope.exclude | length)",
-          "tier1    \(.tier1.head) → \(.tier1.base), authors \(.tier1.authors | join(",")), ≤\(.tier1.maxLines) lines, green=\(.tier1.requireGreen), merge=\(.tier1.mergeMethod)",
-          "  allow  \(.tier1.allow | join("  "))",
-          "  deny   \((.tier1.deny + $floor) | join("  "))",
-          "budget   \(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
-          "after    \(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
-          "notify   \(.notify.mode), source \(.notify.source)",
-          "watchdog stale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
+      #
+      # jq emits label and value TAB-separated and the table budgets them
+      # against the window. The label column caps at its own content, so the
+      # value gets everything else — which is what a `deny` list of a dozen
+      # patterns needs and what the hand-spaced columns this replaced could not
+      # give it: they were padded to a width chosen once, in a format string,
+      # and every window narrower than that wrapped mid-pattern.
+      ui_table_clear
+      ui_col label 4 1 muted
+      ui_col value 20 1 body
+      while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done < <(
+        printf '%s\n' "$FACTORY_CFG" |
+          jq -r --argjson floor "$FACTORY_FLOOR_DENY" --arg p "$FACTORY_CONFIG_PATH" --arg d "$(factory_policy_digest)" '
+            "config\t\($p)",
+            "digest\t\($d)",
+            "scope\torgs \(.scope.orgs | join(", ") | if . == "" then "-" else . end)  repos \(.scope.repos | length)  excluded \(.scope.exclude | length)",
+            "tier1\t\(.tier1.head) → \(.tier1.base), authors \(.tier1.authors | join(",")), ≤\(.tier1.maxLines) lines, green=\(.tier1.requireGreen), merge=\(.tier1.mergeMethod)",
+            "allow\t\(.tier1.allow | join("  "))",
+            "deny\t\((.tier1.deny + $floor) | join("  "))",
+            "budget\t\(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
+            "after\t\(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
+            "notify\t\(.notify.mode), source \(.notify.source)",
+            "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
+      )
+      ui_table_data
     fi
     ;;
   init)
-    if [ -f "$FACTORY_CONFIG_PATH" ]; then
-      echo "factory: $FACTORY_CONFIG_PATH already exists — edit it, or delete it first" >&2
-      exit 2
-    fi
+    [ ! -f "$FACTORY_CONFIG_PATH" ] ||
+      die "$FACTORY_CONFIG_PATH already exists — edit it, or delete it first"
     mkdir -p "$(dirname "$FACTORY_CONFIG_PATH")"
     cp "$FACTORY_HOME/share/config.example.json" "$FACTORY_CONFIG_PATH"
-    echo "wrote $FACTORY_CONFIG_PATH — edit scope, then run: factory doctor"
+    out_ok "wrote $FACTORY_CONFIG_PATH"
+    out_info "edit scope, then run: factory doctor"
     ;;
-  *) echo "usage: factory config print [--json] | path | init" >&2; exit 2 ;;
+  *) die "config takes print [--json], path or init" ;;
   esac
 }
 
@@ -176,13 +194,15 @@ cmd_doctor() {
   # shellcheck source=lib/common.sh
   . "$FACTORY_HOME/lib/common.sh"
   local bad=0 warn=0
-  ok()   { echo "  ok    $*"; }
-  note() { echo "  note  $*"; warn=$((warn + 1)); }
-  bad()  { echo "  BAD   $*"; bad=$((bad + 1)); }
+  # The mark carries the state and the colour is the courtesy: a doctor read
+  # through `NO_COLOR`, a pipe or a dumb terminal still sorts ✓ from ✗.
+  ok()   { out_ok   "$*"; }
+  note() { out_warn "$*"; warn=$((warn + 1)); }
+  bad()  { out_bad  "$*"; bad=$((bad + 1)); }
 
-  echo "factory $FACTORY_VERSION — $FACTORY_HOME"
+  out_head "factory $FACTORY_VERSION — $FACTORY_HOME"
   echo
-  echo "tools"
+  out_head "tools"
   if have jq; then ok "jq $(jq --version 2>/dev/null)"; else bad "jq is missing (brew install jq)"; fi
   if have gh; then
     if gh auth status >/dev/null 2>&1; then ok "gh authenticated as $(gh api user -q .login 2>/dev/null || echo '?')"
@@ -192,7 +212,7 @@ cmd_doctor() {
   fi
 
   echo
-  echo "config"
+  out_head "config"
   if [ -f "$FACTORY_CONFIG_PATH" ]; then ok "$FACTORY_CONFIG_PATH"
   else note "$FACTORY_CONFIG_PATH does not exist — running on defaults (factory config init)"; fi
   factory_load
@@ -206,7 +226,7 @@ cmd_doctor() {
   ok "policy digest $(factory_policy_digest)"
 
   echo
-  echo "budget"
+  out_head "budget"
   local mode feed
   mode=$(cfg .budget.mode); feed=$(cfg '.budget.feed // ""')
   # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
@@ -222,7 +242,7 @@ cmd_doctor() {
   fi
 
   echo
-  echo "after merge"
+  out_head "after merge"
   local wd n_cmd
   wd=$(cfg '.afterMerge.workdir // ""'); n_cmd=$(cfg '.afterMerge.commands | length')
   # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
@@ -233,7 +253,7 @@ cmd_doctor() {
   else ok "$n_cmd command(s) in the current directory"; fi
 
   echo
-  echo "state"
+  out_head "state"
   if mkdir -p "$FACTORY_STATE_DIR" 2>/dev/null && [ -w "$FACTORY_STATE_DIR" ]; then
     ok "$FACTORY_STATE_DIR"
   else
@@ -249,9 +269,9 @@ cmd_doctor() {
   "$LIBEXEC/factory-watchdog" once || true
 
   echo
-  if [ "$bad" -gt 0 ]; then echo "doctor: $bad blocking, $warn to note"; return 2; fi
-  if [ "$warn" -gt 0 ]; then echo "doctor: ready, $warn to note"; return 1; fi
-  echo "doctor: ready"
+  if [ "$bad" -gt 0 ]; then out_bad "doctor: $bad blocking, $warn to note"; return 2; fi
+  if [ "$warn" -gt 0 ]; then out_warn "doctor: ready, $warn to note"; return 1; fi
+  out_ok "doctor: ready"
 }
 
 case "${1:-}" in
@@ -265,8 +285,10 @@ skill) shift; cmd_skill "$@" ;;
 -h | --help | help | "") usage ;;
 -V | --version | version) cat "$FACTORY_HOME/VERSION" ;;
 *)
-  echo "factory: unknown verb '$1'" >&2
-  echo "try: factory --help" >&2
+  # Both on fd 2: an unknown verb is not a report, so neither line lands on the
+  # stream a report is captured off.
+  fail "unknown verb '$1'"
+  hint "try: factory --help"
   exit 2
   ;;
 esac

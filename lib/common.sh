@@ -22,8 +22,11 @@ FACTORY_CONFIG_PATH="${FACTORY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/factory
 # shellcheck disable=SC2034
 FACTORY_VERSION="$(cat "$FACTORY_HOME/VERSION" 2>/dev/null || echo 0.0.0)"
 
-die() { echo "factory: $*" >&2; exit 2; }
-have() { command -v "$1" >/dev/null 2>&1; }
+# Presentation — the report verbs (`out_ok`, `out_head`, `die`) and snug's
+# painter behind them. Sourced first because `die` is what a bad config uses.
+# shellcheck source=lib/ui.sh
+. "$FACTORY_HOME/lib/ui.sh"
+
 have jq || die "jq is required (brew install jq)"
 
 # ── the floor ─────────────────────────────────────────────────────────────────

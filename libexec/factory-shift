@@ -60,12 +60,22 @@ done
 # Human line to the log always; stdout carries whichever shape the caller asked
 # for. The log is never JSON: it is the artifact a person reads in the morning,
 # and one artifact that two readers disagree about is worse than two.
-say() { # say <json-or-empty> <human line>
+say() { # say <json-or-empty> <human line> [ok|warn|err|muted]
   printf '%s %s\n' "$(date '+%H:%M')" "$2" >>"$LOG"
   if [ "$json" = 1 ]; then
     [ -z "$1" ] || printf '%s\n' "$1"
   else
-    printf '%s\n' "$2"
+    # The mark is the third argument and it defaults to `·`, because most of a
+    # pass IS neutral: a policy digest, a budget reading, a PR the filter
+    # correctly declined. Only what a person would act on in the morning gets a
+    # ⚠, and only a merge gets a ✓ — a log where every line is marked is a log
+    # with no marks in it.
+    case "${3:-muted}" in
+    ok)   out_ok   "$2" ;;
+    warn) out_warn "$2" ;;
+    err)  out_bad  "$2" ;;
+    *)    out_info "$2" ;;
+    esac
   fi
 }
 J() { jq -nc "$@"; }
@@ -74,7 +84,12 @@ J() { jq -nc "$@"; }
 # own log line. Under the state dir rather than mktemp so a killed pass leaves
 # it beside the log it belongs to instead of in the system temp dir.
 ERRF="$FACTORY_STATE_DIR/.stderr.$$"
-trap 'rm -f "$ERRF"' EXIT
+# factory-tier's own stderr, kept in a second file rather than folded into its
+# stdout with `2>&1`. Its verdict is a JSON document this pass reads fields out
+# of, and a `gh` warning interleaved into that is a document nothing can parse —
+# which would turn every warning into a tier-unknown.
+TIERF="$FACTORY_STATE_DIR/.tier.$$"
+trap 'rm -f "$ERRF" "$TIERF"' EXIT
 
 say "$(J --arg d "$(factory_policy_digest)" --arg v "$FACTORY_VERSION" \
   '{event:"policy", digest:$d, version:$v}')" \
@@ -127,16 +142,16 @@ if [ "$BUDGET_MODE" = unmetered ]; then
     "budget: unmetered by config · fixer: yes"
 elif [ -z "$USAGE_TSV" ]; then
   say "$(J '{event:"budget", mode:"metered", fixer:false, reason:"no feed configured"}')" \
-    "budget: unknown — budget.feed is not configured · fixer: no (budget unknown)"
+    "budget: unknown — budget.feed is not configured · fixer: no (budget unknown)" warn
 elif [ ! -s "$USAGE_TSV" ]; then
   say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("no usage feed at " + $f)}')" \
-    "budget: unknown — no usage feed at $USAGE_TSV · fixer: no (budget unknown)"
+    "budget: unknown — no usage feed at $USAGE_TSV · fixer: no (budget unknown)" warn
 else
   IFS=$'\t' read -r p5 pw r5 rw _rest <"$USAGE_TSV"
   now=$(date +%s)
   if ! num "${p5:-}" || ! num "${pw:-}" || [ "$p5" -gt 100 ] || [ "$pw" -gt 100 ]; then
     say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("unreadable feed at " + $f)}')" \
-      "budget: unreadable feed at $USAGE_TSV (columns moved?) · fixer: no (budget unknown)"
+      "budget: unreadable feed at $USAGE_TSV (columns moved?) · fixer: no (budget unknown)" warn
   else
     p5=$((10#$p5)); pw=$((10#$pw))
     # A reset stamp is what makes the percentage beside it a claim about NOW,
@@ -164,7 +179,7 @@ else
     fi
     if [ -n "$stamp" ]; then
       say "$(J --argjson p5 "$p5" --argjson pw "$pw" --arg s "$stamp" '{event:"budget", mode:"metered", fixer:false, window5h:$p5, week:$pw, reason:($s + " reset stamp unusable")}')" \
-        "budget: 5h ${p5}% · week ${pw}% (${stamp} reset stamp unusable — ${stamp_why}) · fixer: no (budget unknown)"
+        "budget: 5h ${p5}% · week ${pw}% (${stamp} reset stamp unusable — ${stamp_why}) · fixer: no (budget unknown)" warn
     else
       reserve=$((RESERVE * left / 604800))
       headroom=$((CEILING - pw - reserve))
@@ -187,9 +202,15 @@ fi
 
 # ── lease ─────────────────────────────────────────────────────────────────────
 lease_live=0
-if lease_line=$("$LIBEXEC/factory-lease" status); then lease_live=1; fi
+# `--json` for the same reason `tier` is asked in JSON below: `lease status`'s
+# human line carries a mark in its gutter now, and a pass that echoed it would
+# print the mark twice — once from the lease and once from `say`.
+if lease_json=$("$LIBEXEC/factory-lease" status --json 2>/dev/null); then lease_live=1; fi
+lease_line=$(jq -r '.line // "lease: unreadable"' <<<"${lease_json:-}" 2>/dev/null)
+[ -n "$lease_line" ] || lease_line="lease: unreadable"
 say "$(J --argjson live "$([ "$lease_live" = 1 ] && echo true || echo false)" --arg line "$lease_line" \
-  '{event:"lease", live:$live, line:$line}')" "$lease_line"
+  '{event:"lease", live:$live, line:$line}')" "$lease_line" \
+  "$([ "$lease_live" = 1 ] && echo ok || echo muted)"
 if [ "$dry" = 1 ]; then
   say "$(J '{event:"dry-run"}')" "dry-run: sensing only, merging nothing"
 fi
@@ -202,7 +223,7 @@ fi
 # to an answer that happens to parse. A pass that sensed nothing exits non-zero
 # so the foreman cannot read it as a clean one.
 abort() { # abort <reason>
-  say "$(J --arg r "$1" '{event:"aborted", reason:$r}')" "pass ABORTED: $1"
+  say "$(J --arg r "$1" '{event:"aborted", reason:$r}')" "pass ABORTED: $1" err
   # This one DOES card, where ci-unknown does not, and the asymmetry is blast
   # radius rather than cause: ci-unknown is one repo unseen in a pass that
   # otherwise ran, and this is the whole pass dead.
@@ -261,9 +282,15 @@ for repo in $repos; do
       # foreman is told that queued rows need nothing because they are the
       # morning's by design, so a PR nobody managed to sense gets filed as one
       # nobody needs to look at.
-      verdict=$("$LIBEXEC/factory-tier" "$repo" "$pr_num" 2>&1); tier_rc=$?
+      #  Asked for JSON, and that is not a style choice. One verb parsing
+      # another's human line is a coupling nothing declares: the moment `tier`
+      # gained a mark in its gutter, `${verdict#tier: not-1 — }` stopped
+      # stripping and the whole verdict leaked into the `queued:` reason. The
+      # `--json` shape is the contract that was always meant to carry this.
+      verdict=$("$LIBEXEC/factory-tier" --json "$repo" "$pr_num" 2>"$TIERF"); tier_rc=$?
       case "$tier_rc" in
       0)
+        head_sha=$(jq -r '.head // ""' <<<"$verdict" 2>/dev/null)
         if [ "$dry" = 1 ] || [ "$lease_live" = 0 ]; then
           tag=""; [ "$lease_live" = 0 ] && tag=" (no lease)"
           say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --argjson l "$([ "$lease_live" = 1 ] && echo true || echo false)" \
@@ -272,9 +299,9 @@ for repo in $repos; do
         # Pinned to the head SHA the verdict was computed on: a push landing in
         # the gap makes the merge fail closed to merge-failed, not ride in.
         elif gh pr merge "$pr_num" -R "$repo" "--$method" \
-          --match-head-commit "${verdict##*head=}" >/dev/null 2>"$ERRF"; then
-          say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg h "${verdict##*head=}" \
-            '{event:"merged", repo:$r, number:$n, title:$t, head:$h}')" "merged: $repo#$pr_num $title"
+          --match-head-commit "$head_sha" >/dev/null 2>"$ERRF"; then
+          say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg h "$head_sha" \
+            '{event:"merged", repo:$r, number:$n, title:$t, head:$h}')" "merged: $repo#$pr_num $title" ok
           merged=$((merged + 1))
         else
           # A failed WRITE is read for the same thing as a failed read, so it
@@ -286,26 +313,27 @@ for repo in $repos; do
           # Without the reason those are one line.
           say "$(J --arg r "$repo" --argjson n "$pr_num" --arg e "$(oneline "$(cat "$ERRF")")" \
             '{event:"merge-failed", repo:$r, number:$n, stderr:$e}')" \
-            "merge-failed: $repo#$pr_num — left open: $(oneline "$(cat "$ERRF")")"
+            "merge-failed: $repo#$pr_num — left open: $(oneline "$(cat "$ERRF")")" warn
         fi
         ;;
       3)
-        # The verdict line ends in its own `($repo#$num)`, which this line has
-        # already said; stripped so the reason column is the reason alone.
-        why="${verdict#tier: not-1 — }"; why="${why%%  (*}"
+        # `.reason` is the reason alone — the human line ends in its own
+        # `($repo#$num)`, which this line has already said.
+        why=$(jq -r '.reason // "no reason given"' <<<"$verdict" 2>/dev/null)
+        [ -n "$why" ] || why="no reason given"
         say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg w "$why" \
           '{event:"queued", repo:$r, number:$n, title:$t, reason:$w}')" \
           "queued: $repo#$pr_num $title — $why"
         ;;
-      *) say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg e "$(oneline "$verdict")" \
+      *) say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg e "$(oneline "$verdict $(cat "$TIERF")")" \
            '{event:"tier-unknown", repo:$r, number:$n, title:$t, stderr:$e}')" \
-           "tier-unknown: $repo#$pr_num $title — not judged: $(oneline "$verdict")" ;;
+           "tier-unknown: $repo#$pr_num $title — not judged: $(oneline "$verdict $(cat "$TIERF")")" warn ;;
       esac
     done <<<"$pr_rows"
   else
     say "$(J --arg r "$repo" --arg e "$(oneline "$(cat "$ERRF")")" \
       '{event:"prs-unknown", repo:$r, stderr:$e}')" \
-      "prs-unknown: $repo — its open PRs could not be listed this pass: $(oneline "$(cat "$ERRF")")"
+      "prs-unknown: $repo — its open PRs could not be listed this pass: $(oneline "$(cat "$ERRF")")" warn
   fi
 
   # cancelled is deliberately not red: concurrency groups cancel superseded runs
@@ -329,14 +357,14 @@ for repo in $repos; do
     case "${conclusion:-}" in
     failure | timed_out | startup_failure)
       say "$(J --arg r "$repo" --arg u "$url" --arg c "$conclusion" \
-        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url"
+        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url" err
       notify fault "CI red on $repo $base" "$url"
       ;;
     esac
   else
     say "$(J --arg r "$repo" --arg e "$(oneline "$(cat "$ERRF")")" \
       '{event:"ci-unknown", repo:$r, stderr:$e}')" \
-      "ci-unknown: $repo — $base's latest run not read: $(oneline "$(cat "$ERRF")")"
+      "ci-unknown: $repo — $base's latest run not read: $(oneline "$(cat "$ERRF")")" warn
   fi
   conclusion=""; url=""
 done
@@ -361,14 +389,14 @@ if [ "$merged" -gt 0 ] && [ "$dry" = 0 ]; then
   if [ -n "$stopped" ]; then
     say "$(J --arg c "$stopped" --arg e "$(oneline "$(cat "$ERRF")")" \
       '{event:"after-merge-failed", command:$c, stderr:$e}')" \
-      "after-merge-failed: $stopped — run it by hand in the morning: $(oneline "$(cat "$ERRF")")"
+      "after-merge-failed: $stopped — run it by hand in the morning: $(oneline "$(cat "$ERRF")")" warn
     notify fault "factory: after-merge hook failed after $merged merge(s)"
   elif [ "$ran" -gt 0 ]; then
     say "$(J --argjson n "$ran" --argjson m "$merged" '{event:"after-merge", commands:$n, merged:$m}')" \
-      "after-merge: $ran command(s) ok after $merged merge(s)"
+      "after-merge: $ran command(s) ok after $merged merge(s)" ok
   fi
 fi
 
-say "$(J --argjson m "$merged" '{event:"pass-done", merged:$m}')" "pass done: $merged merged"
+say "$(J --argjson m "$merged" '{event:"pass-done", merged:$m}')" "pass done: $merged merged" ok
 [ "$merged" -gt 0 ] && notify "done" "factory: merged $merged tier-1 PR(s)"
 exit 0

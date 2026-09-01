@@ -130,7 +130,10 @@ note() {
   line="$(date '+%H:%M') $*"
   size_before=0
   if [ -e "$f" ]; then size_before=$(wc -c <"$f" | tr -d ' '); fi
-  echo "$*"
+  # Marked on screen, plain in the log: the log is grepped for its event names
+  # by the morning's handover and by this repo's own tests, and a mark in front
+  # of one is a mark in front of every pattern that reads it.
+  out_warn "$*"
   printf '%s\n' "$line" >>"$f"
   [ -n "$before" ] || return 0
   # Measured in BYTES both sides. `${#line}` counts CHARACTERS, and these lines
@@ -174,7 +177,7 @@ check() {
   # silence this script exists to refuse. Fatal rather than degraded: with no
   # lease command there is no authority to reason about at all.
   if [ ! -x "$LEASECMD" ]; then
-    echo "watchdog: cannot run $LEASECMD — no lease can be read, let alone revoked" >&2
+    fail "cannot run $LEASECMD — no lease can be read, let alone revoked"
     exit 2
   fi
   "$LEASECMD" status >/dev/null 2>&1 || return 1
@@ -200,7 +203,15 @@ report() { # report <state> <quiet secs> <human line>
       --argjson pid "$(poller_pid 2>/dev/null || echo null)" \
       '{state: $state, quietSeconds: $quiet, pollerPid: $pid, line: $line}'
   else
-    echo "$3"
+    # The state names the mark, so the two can never disagree: `alive` is the
+    # only ✓ here, `no-lease` is the ordinary quiet of a machine nobody granted
+    # anything, and the two that mean "the thing you were relying on is not
+    # happening" are the ones worth a ⚠.
+    case "$1" in
+    alive) out_ok "$3" ;;
+    no-poller | stalled) out_warn "$3" ;;
+    *) out_info "$3" ;;
+    esac
   fi
 }
 
@@ -263,7 +274,7 @@ run)
     if ln "$mine" "$PIDFILE" 2>/dev/null; then
       claimed=1
     elif pid=$(poller_pid); then
-      echo "watchdog: already running (pid $pid)"
+      out_info "watchdog: already running (pid $pid)"
       rm -f "$mine"
       exit 0
     else
@@ -273,7 +284,7 @@ run)
     fi
   fi
   rm -f "$mine"
-  [ "$claimed" = 1 ] || { echo "watchdog: could not claim $PIDFILE" >&2; exit 1; }
+  [ "$claimed" = 1 ] || { fail "could not claim $PIDFILE"; exit 1; }
   # Only ever remove a pidfile that is still OURS, so a poller exiting late
   # cannot delete the successor's.
   trap 'if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ]; then rm -f "$PIDFILE"; fi' EXIT
@@ -345,9 +356,9 @@ run)
   ;;
 stop)
   if pid=$(poller_pid) && kill "$pid" 2>/dev/null; then
-    echo "watchdog: stopped"
+    out_ok "watchdog: stopped"
   else
-    echo "watchdog: not running"
+    out_info "watchdog: not running"
   fi
   rm -f "$PIDFILE"
   ;;

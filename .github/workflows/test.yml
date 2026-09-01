@@ -44,7 +44,7 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -x bin/factory libexec/factory-lease libexec/factory-shift \
-            libexec/factory-tier libexec/factory-watchdog lib/common.sh \
+            libexec/factory-tier libexec/factory-watchdog lib/common.sh lib/ui.sh \
             script/check-skills.sh
 
       # The same script nix/skill.nix runs, over the same discovered set: a
@@ -53,7 +53,18 @@ jobs:
       - name: skill guards
         run: ./script/check-skills.sh ai factory
 
+      # snug's bash half is the painter every report here draws through, and it
+      # is a file rather than a service — so the presentation cases need the
+      # file, not the binary and not Nix. Without it they `skip`, which would
+      # leave the painted contract unexercised on the one machine that runs
+      # this on every push.
+      - name: check out snug (the presentation runtime)
+        uses: actions/checkout@v4
+        with:
+          repository: hausfold/snug
+          path: .snug
+
       - name: bats
         run: |
           bats --version
-          bats test/
+          FACTORY_UI_SH="$PWD/.snug/share/ui.sh" bats test/

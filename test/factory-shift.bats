@@ -24,7 +24,10 @@ setup() {
   mkdir -p "$TMP/root/libexec" "$TMP/root/lib" "$TMP/bin"
   cp "$BATS_TEST_DIRNAME/../libexec/factory-shift" "$TMP/root/libexec/"
   cp "$BATS_TEST_DIRNAME/../libexec/factory-lease" "$TMP/root/libexec/"
-  cp "$BATS_TEST_DIRNAME/../lib/common.sh" "$TMP/root/lib/"
+  # The whole lib/, not a named file: `common.sh` sources `ui.sh` beside it,
+  # and a copy list that names one of two is a harness that reds on a file the
+  # tool ships correctly.
+  cp "$BATS_TEST_DIRNAME"/../lib/*.sh "$TMP/root/lib/"
   cp "$BATS_TEST_DIRNAME/../VERSION" "$TMP/root/"
   SHIFT="$TMP/root/libexec/factory-shift"
 
@@ -131,10 +134,14 @@ EOF
 
 # $1 = the exit code factory-tier returns: 0 judged tier-1 · 3 judged refusal ·
 # anything else is `set -e` aborting inside it, i.e. no verdict at all.
+# The stub speaks JSON because the shift asks for it: `--json` is the contract
+# between the two verbs, and the human line is drawn for a person. These are the
+# documents `libexec/factory-tier` actually emits — test/factory-tier.bats reads
+# the real ones at their source.
 stub_tier() {
   case "$1" in
-  0) body='echo "tier: 1 (hausfold/perch#7 · 1 files, 2 lines) head=deadbeef"; exit 0' ;;
-  3) body='echo "tier: not-1 — touches AGENTS.md  (hausfold/perch#7)"; exit 3' ;;
+  0) body='echo "{\"tier\":1,\"repo\":\"hausfold/perch\",\"number\":7,\"head\":\"deadbeef\",\"files\":1,\"lines\":2,\"reason\":null}"; exit 0' ;;
+  3) body='echo "{\"tier\":null,\"repo\":\"hausfold/perch\",\"number\":7,\"head\":null,\"reason\":\"touches AGENTS.md\"}"; exit 3' ;;
   *) body='echo "gh: connection reset by peer" >&2; exit 1' ;;
   esac
   printf '#!/usr/bin/env bash\n%s\n' "$body" >"$TMP/root/libexec/factory-tier"
@@ -477,9 +484,9 @@ EOF
   run "$SHIFT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"merged: hausfold/perch#7"* ]]
-  # The head SHA comes out of factory-tier's verdict line by `${verdict##*head=}`,
-  # so this is the far end of the contract test/factory-tier.bats pins at its
-  # source. Two files, and nothing but these two cases holding them together.
+  # The head SHA comes out of factory-tier's `--json` verdict, so this is the
+  # far end of the contract test/factory-tier.bats pins at its source. Two
+  # files, and nothing but these two cases holding them together.
   grep -q -- "--match-head-commit deadbeef" "$GH_MERGE_CALLS"
   [[ "$output" == *"after-merge: 2 command(s) ok after 1 merge(s)"* ]]
 }
