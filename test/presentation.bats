@@ -87,7 +87,7 @@ setup() {
 # ── the degradation ───────────────────────────────────────────────────────────
 
 @test "with no ui.sh the marks survive and nothing is painted" {
-  run env -u FACTORY_UI_SH CLICOLOR_FORCE=1 "$FACTORY" lease status
+  run env -u FACTORY_UI_SH TERM=xterm-256color CLICOLOR_FORCE=1 "$FACTORY" lease status
   [ "$status" -eq 1 ]
   [[ "$output" == *"lease: none"* ]]
   [[ "$output" != *$'\033'* ]]
@@ -132,20 +132,33 @@ setup() {
 # beside snug's is exactly how two answers to one question appear.
 @test "CLICOLOR_FORCE paints a piped report" {
   [ -n "$UI_SH" ] || skip "no snug on PATH"
-  run env FACTORY_UI_SH="$UI_SH" CLICOLOR_FORCE=1 "$FACTORY" lease status
+  # TERM is named, not inherited. `CLICOLOR_FORCE` overrides the STREAM question
+  # ("is fd 1 a terminal?"), never the CAPABILITY one ("can this terminal show a
+  # colour?") — and a CI runner has no TERM at all, so snug resolves `none` and
+  # forcing paints nothing. Correct of snug, and a case that inherits the
+  # environment is asking two questions while pretending to ask one.
+  run env FACTORY_UI_SH="$UI_SH" TERM=xterm-256color CLICOLOR_FORCE=1 "$FACTORY" lease status
   [[ "$output" == *$'\033'* ]]
+}
+
+@test "forcing colour on a terminal that has none paints nothing" {
+  [ -n "$UI_SH" ] || skip "no snug on PATH"
+  # The other half of the case above, and the shape a CI runner is actually in.
+  run env -u TERM FACTORY_UI_SH="$UI_SH" CLICOLOR_FORCE=1 "$FACTORY" lease status
+  [[ "$output" == *"lease: none"* ]]
+  [[ "$output" != *$'\033'* ]]
 }
 
 @test "TERM=dumb stays plain even when colour is forced" {
   [ -n "$UI_SH" ] || skip "no snug on PATH"
-  run env FACTORY_UI_SH="$UI_SH" CLICOLOR_FORCE=1 TERM=dumb "$FACTORY" lease status
+  run env FACTORY_UI_SH="$UI_SH" TERM=dumb CLICOLOR_FORCE=1 "$FACTORY" lease status
   [[ "$output" == *"lease: none"* ]]
   [[ "$output" != *$'\033'* ]]
 }
 
 @test "NO_COLOR alone leaves the report plain" {
   [ -n "$UI_SH" ] || skip "no snug on PATH"
-  run env FACTORY_UI_SH="$UI_SH" NO_COLOR=1 "$FACTORY" lease status
+  run env FACTORY_UI_SH="$UI_SH" TERM=xterm-256color NO_COLOR=1 "$FACTORY" lease status
   [[ "$output" != *$'\033'* ]]
 }
 
@@ -153,7 +166,7 @@ setup() {
 
 @test "config path is a bare path, marked with nothing" {
   [ -n "$UI_SH" ] || skip "no snug on PATH"
-  run env FACTORY_UI_SH="$UI_SH" CLICOLOR_FORCE=1 "$FACTORY" config path
+  run env FACTORY_UI_SH="$UI_SH" TERM=xterm-256color CLICOLOR_FORCE=1 "$FACTORY" config path
   [ "$status" -eq 0 ]
   [[ "$output" == /* ]]
   [[ "$output" != *$'\033'* ]]

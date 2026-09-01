@@ -298,7 +298,7 @@ turns it on for a pipe, and `dumb` beats even that.
 ## Development
 
 ```sh
-bats test/                                    # 99 cases
+bats test/                                    # 102 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.
