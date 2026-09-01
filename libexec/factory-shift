@@ -132,24 +132,39 @@ elif [ ! -s "$USAGE_TSV" ]; then
   say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("no usage feed at " + $f)}')" \
     "budget: unknown — no usage feed at $USAGE_TSV · fixer: no (budget unknown)"
 else
-  IFS=$'\t' read -r p5 pw _r5 rw _rest <"$USAGE_TSV"
+  IFS=$'\t' read -r p5 pw r5 rw _rest <"$USAGE_TSV"
   now=$(date +%s)
   if ! num "${p5:-}" || ! num "${pw:-}" || [ "$p5" -gt 100 ] || [ "$pw" -gt 100 ]; then
     say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("unreadable feed at " + $f)}')" \
       "budget: unreadable feed at $USAGE_TSV (columns moved?) · fixer: no (budget unknown)"
   else
     p5=$((10#$p5)); pw=$((10#$pw))
-    # The reset stamp is the one input the reserve is a FUNCTION of, so it is
-    # bounded on both sides rather than merely tested for being in the future.
-    # A stamp further out than the window it names — what a units change
-    # upstream from seconds to milliseconds looks like — otherwise yields a
-    # reserve of six figures, and a gate held shut forever by a `no` that reads
-    # like every other `no`. A week is what a weekly reset can be at most.
+    # A reset stamp is what makes the percentage beside it a claim about NOW,
+    # so BOTH are bounded on both sides rather than merely tested for being in
+    # the future. A stamp further out than the window it names — what a units
+    # change upstream from seconds to milliseconds looks like — otherwise
+    # yields a reserve of six figures, and a gate held shut forever by a `no`
+    # that reads like every other `no`. A stamp at or before `now` is the
+    # opposite failure and the quieter one: the window it measured has already
+    # rolled over, so the feed still parses and its percentage is history read
+    # as live spend. The 5-hour half needs that bound most, because `p5` feeds
+    # the test that OUTRANKS the weekly one — unbounded, a feed that stopped
+    # hours ago is the one stale number here that can still say `yes`.
+    # A week and five hours are what each reset can be at most.
+    stamp='' stamp_why=''
     left=-1
     if num "${rw:-}"; then left=$((10#$rw - now)); fi
     if [ "$left" -le 0 ] || [ "$left" -gt 604800 ]; then
-      say "$(J --argjson p5 "$p5" --argjson pw "$pw" '{event:"budget", mode:"metered", fixer:false, window5h:$p5, week:$pw, reason:"weekly reset stamp unusable"}')" \
-        "budget: 5h ${p5}% · week ${pw}% (weekly reset stamp unusable — headroom unknown) · fixer: no (budget unknown)"
+      stamp=weekly stamp_why="headroom unknown"
+    fi
+    left5=-1
+    if num "${r5:-}"; then left5=$((10#$r5 - now)); fi
+    if [ -z "$stamp" ] && { [ "$left5" -le 0 ] || [ "$left5" -gt 18000 ]; }; then
+      stamp=5-hour stamp_why="the 5h % beside it is not about now"
+    fi
+    if [ -n "$stamp" ]; then
+      say "$(J --argjson p5 "$p5" --argjson pw "$pw" --arg s "$stamp" '{event:"budget", mode:"metered", fixer:false, window5h:$p5, week:$pw, reason:($s + " reset stamp unusable")}')" \
+        "budget: 5h ${p5}% · week ${pw}% (${stamp} reset stamp unusable — ${stamp_why}) · fixer: no (budget unknown)"
     else
       reserve=$((RESERVE * left / 604800))
       headroom=$((CEILING - pw - reserve))

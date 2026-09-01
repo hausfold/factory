@@ -178,10 +178,14 @@ stub_tier() {
 # far off the weekly reset is. The third argument is seconds of week REMAINING,
 # because that is what the human's reserve drains against — a test that pinned
 # an absolute stamp would start passing for the wrong reason, then stop.
-stub_usage() { # <5h %> <week %> <seconds of week left>
+stub_usage() { # <5h %> <week %> <seconds of week left> [seconds of 5h left]
   # The path is the one `setup`'s config names; the file simply does not exist
   # until a case calls this, which is how the default is a stated unknown.
-  printf '%s\t%s\t0\t%s\tstub\n' "$1" "$2" "$(($(date +%s) + $3))" >"$TMP/usage.tsv"
+  # Both reset stamps are bounded, so the 5-hour one defaults to a live value:
+  # a case about the week says nothing about the 5-hour window and should not
+  # have to restate it, and a case about the stamp itself passes the 4th arg.
+  local now; now=$(date +%s)
+  printf '%s\t%s\t%s\t%s\tstub\n' "$1" "$2" "$((now + ${4:-3000}))" "$((now + $3))" >"$TMP/usage.tsv"
 }
 
 # ── the budget verdict, which is the fixer gate ───────────────────────────────
@@ -265,14 +269,14 @@ stub_usage() { # <5h %> <week %> <seconds of week left>
   # fatal base-8 error that takes the whole `budget:` line out of the log. A
   # missing line is worse than a wrong one here — the morning reads this file
   # and a row that is simply absent makes no claim it can catch.
-  printf '05\t08\t0\t%s\tstub\n' "$(($(date +%s) + 500000))" >"$TMP/usage.tsv"
+  stub_usage 05 08 500000
   run "$SHIFT" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"budget:"* ]]
   [[ "$output" != *"value too great for base"* ]]
 
   # A negative percentage passes a range test too, and it buys headroom.
-  printf '10\t-5\t0\t%s\tstub\n' "$(($(date +%s) + 500000))" >"$TMP/usage.tsv"
+  stub_usage 10 -5 500000
   run "$SHIFT" --dry-run
   [[ "$output" == *"unreadable feed"*"fixer: no (budget unknown)"* ]]
 }
@@ -286,6 +290,43 @@ stub_usage() { # <5h %> <week %> <seconds of week left>
   run "$SHIFT" --dry-run
   [[ "$output" == *"weekly reset stamp unusable"*"fixer: no (budget unknown)"* ]]
   [[ "$output" != *"headroom -"* ]]
+}
+
+@test "a 5-hour reset stamp that has already passed is unusable, not a live percentage" {
+  # The quieter half of the same failure. A feed that stopped hours ago still
+  # parses, and the window its `5h %` measured has since rolled over — so a
+  # dead 10% is handed to the test that OUTRANKS the weekly one, which is the
+  # only way a stale number here reaches `yes`. Bounded only by the week, that
+  # goes unnoticed until the feed is seven days old.
+  stub_usage 10 16 $((604800 * 84 / 100)) -600
+  run "$SHIFT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"5-hour reset stamp unusable"*"fixer: no (budget unknown)"* ]]
+  [[ "$output" != *"fixer: yes"* ]]
+
+  # Further out than the five hours it names is the units change again.
+  stub_usage 10 16 $((604800 * 84 / 100)) 20000
+  run "$SHIFT" --dry-run
+  [[ "$output" == *"5-hour reset stamp unusable"*"fixer: no (budget unknown)"* ]]
+
+  # And the same feed with a live stamp is the case this one is the negative
+  # of — a bound that refused everything would be invisible.
+  stub_usage 10 16 $((604800 * 84 / 100)) 600
+  run "$SHIFT" --dry-run
+  [[ "$output" == *"fixer: yes"* ]]
+
+  # Pinned AT the edge, on both sides. Freeze the clock first: the stamp and
+  # the script's own `now` straddle a second otherwise, exactly as CI hit on
+  # the weekly edge below.
+  fixed_now=$(date +%s)
+  printf '#!/usr/bin/env bash\necho "%s"\n' "$fixed_now" >"$TMP/bin/date"
+  chmod +x "$TMP/bin/date"
+  stub_usage 10 16 $((604800 * 84 / 100)) 18000
+  run "$SHIFT" --dry-run
+  [[ "$output" == *"fixer: yes"* ]]
+  stub_usage 10 16 $((604800 * 84 / 100)) 18001
+  run "$SHIFT" --dry-run
+  [[ "$output" == *"5-hour reset stamp unusable"*"fixer: no (budget unknown)"* ]]
 }
 
 @test "both thresholds are pinned AT their edge, not near it" {
