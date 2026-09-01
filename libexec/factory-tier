@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# factory-tier — is this PR tier 1, i.e. mergeable by the shift alone?
+#
+#   factory tier <repo> <number> [--json]   # exit 0 yes · 3 no · 2 usage
+#   factory tier --paths-only <repo> <number>
+#
+# Tier 1 is decided by CODE reading a policy the machine's owner typed, never
+# by a model's judgement of the diff, because merging is the one act in the
+# factory with no undo-by-default. The default policy is deliberately narrow: a
+# docs-only PR — every changed file matching `tier1.allow`, none of it
+# renamed — opened by you from a `worktree-*` branch onto `main`, green and
+# conflict-free, under the line cap.
+#
+# On top of whatever the policy denies sits a FLOOR no config can lower
+# (lib/common.sh, FACTORY_FLOOR_DENY): agent-steering files and CI/client
+# directories are never tier 1 however docs-shaped they look, because both are
+# policy rather than prose and a policy change always meets a person.
+#
+# Prints one verdict line; every refusal names its reason so the shift log
+# reads as an audit trail.
+# Every jq program in this file is single-quoted on purpose: `$d`, `$repo` and
+# the rest are jq's OWN variables, bound by --arg/--argjson, and expanding them
+# in the shell first is exactly the bug the quoting prevents.
+# shellcheck disable=SC2016
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+# shellcheck source=../lib/common.sh
+. "$(dirname "$0")/../lib/common.sh"
+factory_load
+
+paths_only=0
+json=0
+args=()
+for a in "$@"; do
+  case "$a" in
+  --paths-only) paths_only=1 ;;
+  --json) json=1 ;;
+  *) args+=("$a") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+repo="${1:-}"; num="${2:-}"
+if [ -z "$repo" ] || [ -z "$num" ]; then
+  echo "usage: factory tier [--paths-only] [--json] <repo> <number>" >&2
+  exit 2
+fi
+# A bare name resolves against the one org in scope. With none or several
+# configured it is ambiguous, and guessing which org a name belongs to is how a
+# verdict gets computed against the wrong repo.
+case "$repo" in
+*/*) ;;
+*)
+  orgs=$(cfgj '.scope.orgs')
+  if [ "$(jq length <<<"$orgs")" = 1 ]; then
+    repo="$(jq -r '.[0]' <<<"$orgs")/$repo"
+  else
+    echo "factory: '$repo' has no owner and scope.orgs does not name exactly one org" >&2
+    exit 2
+  fi
+  ;;
+esac
+
+no() { # no <reason>
+  if [ "$json" = 1 ]; then
+    jq -nc --arg repo "$repo" --argjson num "$num" --arg reason "$1" \
+      '{tier: null, repo: $repo, number: $num, head: null, reason: $reason}'
+  else
+    echo "tier: not-1 — $1  ($repo#$num)"
+  fi
+  exit 3
+}
+
+json_pr=$(gh pr view "$num" -R "$repo" --json state,isDraft,author,baseRefName,headRefName,headRefOid,mergeable,statusCheckRollup,changedFiles,additions,deletions)
+
+# Files come from the REST endpoint, paginated — not from `gh pr view`'s GraphQL
+# `files` — for two reasons that both merge code at 3 a.m. if ignored: GraphQL
+# stops at 100 files SILENTLY (files 101+ never meet the filter), and it carries
+# no rename information, so a `git mv` of a workflow into docs/ lists only the
+# new, docs-shaped path. A rename is a delete wearing a docs name; none is ever
+# tier 1, and that is a floor rather than a setting.
+files=$(gh api --paginate "repos/$repo/pulls/$num/files" \
+  --jq '[.[] | {path: .filename, status: .status}]' | jq -s add)
+count=$(jq length <<<"$files")
+[ "$count" -gt 0 ] || no "no files"
+[ "$count" = "$(jq .changedFiles <<<"$json_pr")" ] || no "file list truncated ($count of $(jq .changedFiles <<<"$json_pr"))"
+renamed=$(jq -r '[.[] | select(.status == "renamed") | .path] | first // empty' <<<"$files")
+[ -z "$renamed" ] || no "renames $renamed"
+
+# ALLOW is case-SENSITIVE and DENY is case-insensitive, and the asymmetry is
+# deliberate in both directions. A path that does not match allow is refused, so
+# reading `Docs/x` as unmatched fails closed. A path that matches deny is
+# refused, so reading `docs/claude.md` as a match fails closed too — and APFS
+# being case-insensitive, that file IS what a tool opening docs/CLAUDE.md reads.
+allow=$(cfgj '.tier1.allow')
+deny=$(cfgj ".tier1.deny + $FACTORY_FLOOR_DENY")
+bad_path=$(jq -r --argjson allow "$allow" --argjson deny "$deny" '
+  [ .[].path
+    | select(
+        ( . as $p | $allow | any(. as $re | $p | test($re))      ) and
+        ( . as $p | $deny  | any(. as $re | $p | test($re; "i")) | not )
+      | not )
+  ] | first // empty' <<<"$files")
+[ -z "$bad_path" ] || no "touches $bad_path"
+
+if [ "$paths_only" = 1 ]; then
+  if [ "$json" = 1 ]; then
+    jq -nc --arg repo "$repo" --argjson num "$num" --argjson n "$count" \
+      '{tier: 1, repo: $repo, number: $num, files: $n, pathsOnly: true}'
+  else
+    echo "tier: paths ok ($repo#$num)"
+  fi
+  exit 0
+fi
+
+churn=$(jq '.additions + .deletions' <<<"$json_pr")
+max=$(cfg .tier1.maxLines)
+[ "$churn" -le "$max" ] || no "$churn changed lines (cap $max)"
+
+base=$(cfg .tier1.base)
+head_re=$(cfg .tier1.head)
+[ "$(jq -r .state <<<"$json_pr")" = OPEN ] || no "not open"
+[ "$(jq -r .isDraft <<<"$json_pr")" = false ] || no "draft"
+[ "$(jq -r .baseRefName <<<"$json_pr")" = "$base" ] || no "base is not $base"
+jq -e --arg re "$head_re" '.headRefName | test($re)' <<<"$json_pr" >/dev/null ||
+  no "head is not a $head_re branch"
+
+# `@me` is resolved rather than assumed, so the same config works on any
+# machine; `*` is the explicit opt-out for a repo whose PRs you do not open
+# yourself. An empty list is refused at config load, never read as "anyone".
+authors=$(cfgj '.tier1.authors')
+if ! jq -e 'any(. == "*")' <<<"$authors" >/dev/null; then
+  me=""
+  jq -e 'any(. == "@me")' <<<"$authors" >/dev/null && me="$(gh api user -q .login)"
+  jq -e --argjson a "$authors" --arg me "$me" --arg who "$(jq -r .author.login <<<"$json_pr")" \
+    -n '$a | map(if . == "@me" then $me else . end) | any(. == $who)' >/dev/null ||
+    no "author is not in tier1.authors ($(jq -r .author.login <<<"$json_pr"))"
+fi
+
+[ "$(jq -r .mergeable <<<"$json_pr")" = MERGEABLE ] || no "mergeable=$(jq -r .mergeable <<<"$json_pr")"
+
+# Checks. `if-present` is the default and the historical behaviour: an empty
+# rollup is fine, because plenty of docs repos run no CI on PRs at all; anything
+# unfinished means "not yet" and anything red means no. `always` additionally
+# refuses a PR that reported no checks — the right setting for a repo where CI
+# is the whole verification story and a workflow that failed to TRIGGER is
+# indistinguishable, from here, from one that passed.
+green=$(cfg .tier1.requireGreen)
+if [ "$green" != never ]; then
+  rollup=$(jq '[.statusCheckRollup[]?] | length' <<<"$json_pr")
+  if [ "$rollup" = 0 ]; then
+    [ "$green" != always ] || no "no checks reported (requireGreen=always)"
+  else
+    pending=$(jq -r '[.statusCheckRollup[]? | select((.status? // "COMPLETED") != "COMPLETED")] | length' <<<"$json_pr")
+    [ "$pending" = 0 ] || no "checks still running"
+    red=$(jq -r '[.statusCheckRollup[]?
+      | (.conclusion? // .state? // "SUCCESS")
+      | select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED")] | first // empty' <<<"$json_pr")
+    [ -z "$red" ] || no "check concluded $red"
+  fi
+fi
+
+# head= is load-bearing: `factory shift` pins the merge to this exact commit
+# (--match-head-commit), so a push landing between this verdict and the merge
+# fails closed instead of riding in unvetted. It must END the line.
+head_sha=$(jq -r .headRefOid <<<"$json_pr")
+if [ "$json" = 1 ]; then
+  jq -nc --arg repo "$repo" --argjson num "$num" --arg head "$head_sha" \
+    --argjson files "$count" --argjson lines "$churn" \
+    '{tier: 1, repo: $repo, number: $num, head: $head, files: $files, lines: $lines, reason: null}'
+else
+  echo "tier: 1 ($repo#$num · $count files, $churn lines) head=$head_sha"
+fi

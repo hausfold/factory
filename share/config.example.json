@@ -1,0 +1,30 @@
+{
+  "scope": {
+    "orgs": [],
+    "repos": ["you/your-repo"],
+    "exclude": []
+  },
+
+  "tier1": {
+    "allow": ["^docs/", "\\.md$"],
+    "deny": [],
+    "base": "main",
+    "head": "^worktree-",
+    "authors": ["@me"],
+    "maxLines": 2000,
+    "requireGreen": "if-present",
+    "mergeMethod": "squash"
+  },
+
+  "afterMerge": {
+    "workdir": null,
+    "commands": []
+  },
+
+  "budget": {
+    "mode": "metered",
+    "feed": null
+  },
+
+  "notify": { "mode": "auto", "source": "factory" }
+}

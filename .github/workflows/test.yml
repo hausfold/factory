@@ -1,0 +1,59 @@
+# Verify factory on every push and PR.
+#
+# What goes wrong with these scripts is not a crash. `factory shift` runs
+# unattended and its product is a log read hours later, so its worst output is a
+# pass that could not see and said nothing — which reads exactly like a quiet
+# night. `test/factory-shift.bats` stubs `gh`, `trill`, the after-merge hook,
+# `factory-tier` and `date` so those passes are observable.
+#
+# `factory-tier` is the one whose output causes something with no
+# undo-by-default, and its bad day is quieter still: a deny clause that stops
+# matching has no symptom until a PR a person meant to see merges at 3 a.m.
+# `test/factory-tier.bats` stubs `gh` and runs the real jq filter — a case per
+# clause, each written so that deleting the clause fails it.
+#
+# `factory-watchdog` is the same argument one layer down, and its silence is
+# harder still: it fires only when the foreman is gone, so nobody ever sees it
+# work on a good night. `test/factory-watchdog.bats` writes lease files and ages
+# logs directly to make every stall shape observable on a runner.
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    name: bats + shellcheck + skill guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # jq is named rather than assumed present: the tier filter IS a jq
+      # program and the config layer is another, so a runner image that dropped
+      # it would turn every case into an error rather than a failure.
+      - name: Install bats + shellcheck + jq
+        run: sudo apt-get update && sudo apt-get install -y bats shellcheck jq
+
+      # The versions are printed because they are not pinned, and apt's
+      # shellcheck disagrees with a newer one about which checks are on by
+      # default. When this step reddens on a line nobody touched, the version is
+      # the first thing to read.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x bin/factory libexec/factory-lease libexec/factory-shift \
+            libexec/factory-tier libexec/factory-watchdog lib/common.sh \
+            script/check-skills.sh
+
+      # The same script nix/skill.nix runs, over the same discovered set: a
+      # skill with broken frontmatter installs, lists and is never loaded, so
+      # the failure has to be a build failure somewhere that runs without Nix.
+      - name: skill guards
+        run: ./script/check-skills.sh ai factory
+
+      - name: bats
+        run: |
+          bats --version
+          bats test/

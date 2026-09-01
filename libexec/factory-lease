@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# factory-lease — the standing merge grant the shift runs under.
+#
+#   factory lease grant 12h     # tier-1 authority for 12 hours
+#   factory lease status        # exit 0 live · 1 none/expired
+#   factory lease revoke
+#
+# A lease is (tier ceiling, expiry). While one is live, `factory shift` may
+# MERGE tier-1 PRs on its own; expired or revoked, everything queues at "PR
+# open" — i.e. the failure mode of the whole factory is the ordinary
+# human-in-the-loop workflow. Only tier 1 exists today; the column is there so
+# a wider grant is a new value, not a new file format.
+#
+# State is one TSV line — <expires epoch>\t<tier>\t<granted epoch> — under the
+# state dir, machine-local on purpose: authority to merge unattended belongs to
+# this machine's owner having typed `grant`, never to a file a PR could edit.
+# Every jq program in this file is single-quoted on purpose: `$d`, `$repo` and
+# the rest are jq's OWN variables, bound by --arg/--argjson, and expanding them
+# in the shell first is exactly the bug the quoting prevents.
+# shellcheck disable=SC2016
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+# shellcheck source=../lib/common.sh
+. "$(dirname "$0")/../lib/common.sh"
+factory_load
+
+LEASE="$FACTORY_STATE_DIR/lease"
+WATCHDOG="$(dirname "$0")/factory-watchdog"
+json=0
+args=()
+for a in "$@"; do
+  case "$a" in --json) json=1 ;; *) args+=("$a") ;; esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  factory lease grant <duration>   # 30m / 12h / 2d — tier-1 authority until then
+  factory lease status [--json]    # exit 0 live · 1 none/expired
+  factory lease revoke
+EOF
+  exit 2
+}
+
+parse_duration() { # 30m / 12h / 2d → seconds
+  case "$1" in
+  *[!0-9smhd]*) echo "factory: bad duration '$1' (use 30m, 12h, 2d)" >&2; exit 2 ;;
+  *m) echo $((${1%m} * 60)) ;;
+  *h) echo $((${1%h} * 3600)) ;;
+  *d) echo $((${1%d} * 86400)) ;;
+  *s) echo "${1%s}" ;;
+  *)  echo "factory: bad duration '$1' (use 30m, 12h, 2d)" >&2; exit 2 ;;
+  esac
+}
+
+emit() { # emit <live> <tier> <expires> <granted> <human line>
+  if [ "$json" = 1 ]; then
+    jq -nc --argjson live "$1" --argjson tier "$2" --argjson expires "$3" \
+      --argjson granted "$4" --arg line "$5" \
+      '{live: $live, tier: $tier, expires: $expires, granted: $granted,
+        secondsLeft: (if $live then ($expires - (now | floor)) else 0 end), line: $line}'
+  else
+    echo "$5"
+  fi
+}
+
+now=$(date +%s)
+case "${1:-}" in
+grant)
+  [ -n "${2:-}" ] || usage
+  secs=$(parse_duration "$2")
+  tier="${3:-1}"
+  [ "$tier" = 1 ] || { echo "factory: only tier 1 exists (see docs/tiers.md)" >&2; exit 2; }
+  mkdir -p "$FACTORY_STATE_DIR"
+  printf '%s\t%s\t%s\n' "$((now + secs))" "$tier" "$now" >"$LEASE"
+  emit true "$tier" "$((now + secs))" "$now" "lease: tier $tier until $(at $((now + secs)))"
+  # A live lease always has a watchdog, and it is started HERE rather than by
+  # the foreman so the invariant is structural: the one thing that must not
+  # depend on the agent still working is the thing that notices it stopped.
+  # `ensure` is idempotent (one pidfile per machine, claimed O_EXCL), so a
+  # second grant inside a live shift extends the lease without racing — and it
+  # is the same verb the foreman re-runs each wakeup, so there is one
+  # implementation of "make sure something is watching".
+  if [ "${FACTORY_NO_WATCHDOG:-0}" != 1 ] && [ -x "$WATCHDOG" ]; then
+    "$WATCHDOG" ensure >/dev/null 2>&1 || true
+  fi
+  ;;
+status)
+  if [ ! -s "$LEASE" ]; then emit false 0 0 0 "lease: none"; exit 1; fi
+  # The granted stamp is the third field; `_` consumes it where nothing reads it.
+  IFS=$'\t' read -r expires tier granted <"$LEASE"
+  num "${expires:-}" || { emit false 0 0 0 "lease: unreadable"; exit 1; }
+  num "${granted:-}" || granted=0
+  num "${tier:-}" || tier=0
+  if [ "$now" -ge "$expires" ]; then
+    emit false "$tier" "$expires" "$granted" "lease: expired $(at "$expires")"; exit 1
+  fi
+  left=$(((expires - now) / 60))
+  emit true "$tier" "$expires" "$granted" \
+    "lease: tier $tier · $((left / 60))h $((left % 60))m left · until $(at "$expires")"
+  ;;
+revoke)
+  rm -f "$LEASE"
+  # The watchdog exits on its own the next time it reads a dead lease, but that
+  # is up to one poll interval of a poller outliving the thing it watches.
+  # Stopping it here keeps "no lease" and "nothing running" the same moment.
+  if [ -x "$WATCHDOG" ]; then "$WATCHDOG" stop >/dev/null 2>&1 || true; fi
+  emit false 0 0 0 "lease: revoked"
+  ;;
+*) usage ;;
+esac

@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# factory-shift — one pass of the shift: sense, merge what code alone can vouch
+# for, report the rest.
+#
+#   factory shift             # act (merges need a live lease)
+#   factory shift --dry-run   # sense + report only, merge nothing
+#   factory shift --json      # one JSON object per event on stdout
+#
+# One pass does four things, in order:
+#   budget   read the configured usage feed and answer the one question the
+#            foreman asks of it: can the account afford an agent lane right
+#            now? The line ends `fixer: yes` or `fixer: no (<why>)`, and the
+#            foreman spawns on nothing else.
+#   merge    every open PR in scope through factory-tier; tier 1 + live lease
+#            → `gh pr merge`. Anything else is printed with its reason and
+#            left for the morning.
+#   after    if anything merged: the configured afterMerge commands, in order.
+#   ci       the latest completed run on each repo's default-branch, red → a
+#            CI-RED line (the foreman's cue) and a fault card.
+#
+# Four lines say the pass could not SEE, and none of them means "nothing to
+# report": `prs-unknown` (a repo's open PRs unlistable), `tier-unknown` (one PR
+# unjudgeable — distinct from `queued`, which is a judged refusal),
+# `ci-unknown` (a branch whose latest run is unreadable), and a non-zero
+# `pass ABORTED` (no repo list, so nothing was sensed at all). Silence is a
+# claim, and here it is only ever the claim that something was looked at.
+#
+# The two lines that report a failed WRITE — `merge-failed` and
+# `after-merge-failed` — are verdicts rather than unknowns, but they quote
+# their stderr for the same reason: the reader's only question is whether this
+# is a repeat, and a fail-closed head-SHA pin and an expired token are the same
+# line without it.
+#
+# Every line is appended to $FACTORY_STATE_DIR/shift-YYYYMMDD.log — the morning
+# report is that file, not a memory of it. Deterministic on purpose: no
+# judgement lives here, so what happened while you slept is exactly what this
+# file says happens.
+# Every jq program in this file is single-quoted on purpose: `$d`, `$repo` and
+# the rest are jq's OWN variables, bound by --arg/--argjson, and expanding them
+# in the shell first is exactly the bug the quoting prevents.
+# shellcheck disable=SC2016
+# shellcheck source-path=SCRIPTDIR
+set -uo pipefail
+# shellcheck source=../lib/common.sh
+. "$(dirname "$0")/../lib/common.sh"
+factory_load
+
+LIBEXEC="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$FACTORY_STATE_DIR"
+LOG="$FACTORY_STATE_DIR/shift-$(date +%Y%m%d).log"
+dry=0; json=0
+for a in "$@"; do
+  case "$a" in
+  --dry-run) dry=1 ;;
+  --json) json=1 ;;
+  *) die "unknown argument '$a' (usage: factory shift [--dry-run] [--json])" ;;
+  esac
+done
+
+# Human line to the log always; stdout carries whichever shape the caller asked
+# for. The log is never JSON: it is the artifact a person reads in the morning,
+# and one artifact that two readers disagree about is worse than two.
+say() { # say <json-or-empty> <human line>
+  printf '%s %s\n' "$(date '+%H:%M')" "$2" >>"$LOG"
+  if [ "$json" = 1 ]; then
+    [ -z "$1" ] || printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+J() { jq -nc "$@"; }
+
+# Where a failed command's stderr is parked long enough to be quoted into its
+# own log line. Under the state dir rather than mktemp so a killed pass leaves
+# it beside the log it belongs to instead of in the system temp dir.
+ERRF="$FACTORY_STATE_DIR/.stderr.$$"
+trap 'rm -f "$ERRF"' EXIT
+
+say "$(J --arg d "$(factory_policy_digest)" --arg v "$FACTORY_VERSION" \
+  '{event:"policy", digest:$d, version:$v}')" \
+  "policy: $(factory_policy_digest) · factory $FACTORY_VERSION"
+
+# ── budget ────────────────────────────────────────────────────────────────────
+# The line ends in a VERDICT, `fixer: yes` or `fixer: no (<why>)`, and that is
+# the whole throttle. It is decided here rather than left to a skill's prose
+# because a threshold written out in English, in another file, over numbers only
+# this one can see, is a threshold no test can reach — and its refusal is the
+# same word as a correct refusal, so a gate stuck shut looks exactly like a gate
+# doing its job. What stays the foreman's is whether a red main is WORTH a lane;
+# whether the account can afford one is answered here, once, and logged where
+# the morning reads it.
+#
+# The question is forward-looking on purpose. "Is the week spent no faster than
+# the clock so far" is a question nobody has, and it cannot be answered yes by
+# anything but an idle week: spend is monotonic and the clock is not rewindable,
+# so one honest burst on Monday reads over-budget until the reset however much
+# is left. The question worth asking is whether spending a lane NOW still leaves
+# the human enough to finish the week — so `reserve` points of the weekly window
+# are held for them and drain with the clock, and the factory may spend what is
+# left below the ceiling.
+CEILING=$(cfg .budget.ceiling)
+RESERVE=$(cfg .budget.reserve)
+FIXER=$(cfg .budget.fixer)
+MAX5H=$(cfg .budget.window5hMax)
+BUDGET_MODE=$(cfg .budget.mode)
+USAGE_TSV=$(cfg '.budget.feed // ""')
+# A literal tilde is what a config file holds; expanding it is this line's job.
+# shellcheck disable=SC2088
+case "$USAGE_TSV" in "~/"*) USAGE_TSV="$HOME/${USAGE_TSV#\~/}" ;; esac
+
+# Every arm ends in a verdict, and every arm that could not do the arithmetic
+# ends in `no`: an unknown budget is not permission, it is the same named
+# unknown the rest of this script degrades to.
+#
+# Each number is checked as DIGITS before anything computes on it, rather than
+# only for range. `[ 08 -le 100 ]` is true and `$((08))` is a fatal base-8 error
+# that takes the whole `budget:` line out of the log — which is silence, the one
+# degradation this block may not have. `-5` passes a range test too, and buys
+# headroom the account does not have.
+budget_verdict="no (budget unknown)"
+if [ "$BUDGET_MODE" = unmetered ]; then
+  # An explicit opt-out, and it is logged as loudly as a refusal: the user said
+  # this account has no quota worth counting, and the morning should be able to
+  # tell that from a feed that merely went missing.
+  budget_verdict=yes
+  say "$(J '{event:"budget", mode:"unmetered", fixer:true}')" \
+    "budget: unmetered by config · fixer: yes"
+elif [ -z "$USAGE_TSV" ]; then
+  say "$(J '{event:"budget", mode:"metered", fixer:false, reason:"no feed configured"}')" \
+    "budget: unknown — budget.feed is not configured · fixer: no (budget unknown)"
+elif [ ! -s "$USAGE_TSV" ]; then
+  say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("no usage feed at " + $f)}')" \
+    "budget: unknown — no usage feed at $USAGE_TSV · fixer: no (budget unknown)"
+else
+  IFS=$'\t' read -r p5 pw _r5 rw _rest <"$USAGE_TSV"
+  now=$(date +%s)
+  if ! num "${p5:-}" || ! num "${pw:-}" || [ "$p5" -gt 100 ] || [ "$pw" -gt 100 ]; then
+    say "$(J --arg f "$USAGE_TSV" '{event:"budget", mode:"metered", fixer:false, reason:("unreadable feed at " + $f)}')" \
+      "budget: unreadable feed at $USAGE_TSV (columns moved?) · fixer: no (budget unknown)"
+  else
+    p5=$((10#$p5)); pw=$((10#$pw))
+    # The reset stamp is the one input the reserve is a FUNCTION of, so it is
+    # bounded on both sides rather than merely tested for being in the future.
+    # A stamp further out than the window it names — what a units change
+    # upstream from seconds to milliseconds looks like — otherwise yields a
+    # reserve of six figures, and a gate held shut forever by a `no` that reads
+    # like every other `no`. A week is what a weekly reset can be at most.
+    left=-1
+    if num "${rw:-}"; then left=$((10#$rw - now)); fi
+    if [ "$left" -le 0 ] || [ "$left" -gt 604800 ]; then
+      say "$(J --argjson p5 "$p5" --argjson pw "$pw" '{event:"budget", mode:"metered", fixer:false, window5h:$p5, week:$pw, reason:"weekly reset stamp unusable"}')" \
+        "budget: 5h ${p5}% · week ${pw}% (weekly reset stamp unusable — headroom unknown) · fixer: no (budget unknown)"
+    else
+      reserve=$((RESERVE * left / 604800))
+      headroom=$((CEILING - pw - reserve))
+      # 5h first, and it is not about the week at all: a factory that saturates
+      # the rolling window at 4 a.m. rate-limits the person who sits down at 9.
+      if [ "$p5" -ge "$MAX5H" ]; then
+        budget_verdict="no (5h window at ${p5}%)"
+      elif [ "$headroom" -lt "$FIXER" ]; then
+        budget_verdict="no (headroom ${headroom} pts, one fixer needs ${FIXER})"
+      else
+        budget_verdict=yes
+      fi
+      say "$(J --argjson p5 "$p5" --argjson pw "$pw" --argjson r "$reserve" --argjson h "$headroom" \
+        --argjson ok "$([ "$budget_verdict" = yes ] && echo true || echo false)" \
+        '{event:"budget", mode:"metered", window5h:$p5, week:$pw, reserve:$r, headroom:$h, fixer:$ok}')" \
+        "budget: 5h ${p5}% · week ${pw}% · reserve ${reserve} pts · headroom ${headroom} pts · fixer: $budget_verdict"
+    fi
+  fi
+fi
+
+# ── lease ─────────────────────────────────────────────────────────────────────
+lease_live=0
+if lease_line=$("$LIBEXEC/factory-lease" status); then lease_live=1; fi
+say "$(J --argjson live "$([ "$lease_live" = 1 ] && echo true || echo false)" --arg line "$lease_line" \
+  '{event:"lease", live:$live, line:$line}')" "$lease_line"
+if [ "$dry" = 1 ]; then
+  say "$(J '{event:"dry-run"}')" "dry-run: sensing only, merging nothing"
+fi
+
+# ── scope ─────────────────────────────────────────────────────────────────────
+# The repo list is the subject of everything below it. When an org listing
+# fails, the loop runs zero times and the pass would still end on "pass done: 0
+# merged" — character-for-character what a genuinely quiet night prints. Same
+# rule the budget block states about itself: degrade to a stated unknown, never
+# to an answer that happens to parse. A pass that sensed nothing exits non-zero
+# so the foreman cannot read it as a clean one.
+abort() { # abort <reason>
+  say "$(J --arg r "$1" '{event:"aborted", reason:$r}')" "pass ABORTED: $1"
+  # This one DOES card, where ci-unknown does not, and the asymmetry is blast
+  # radius rather than cause: ci-unknown is one repo unseen in a pass that
+  # otherwise ran, and this is the whole pass dead.
+  notify fault "factory: pass aborted"
+  exit 1
+}
+
+orgs=$(cfg '.scope.orgs[]?')
+explicit=$(cfg '.scope.repos[]?')
+[ -n "$orgs$explicit" ] || die "scope names no orgs and no repos — nothing to walk (see $FACTORY_CONFIG_PATH)"
+
+archived_flag="--no-archived"
+[ "$(cfg .scope.archived)" != true ] || archived_flag=""
+limit=$(cfg .scope.limit)
+listed=""
+for org in $orgs; do
+  # shellcheck disable=SC2086 # archived_flag is a deliberate word-split-or-nothing
+  if ! rows=$(gh repo list "$org" $archived_flag --limit "$limit" --json nameWithOwner -q '.[].nameWithOwner' 2>"$ERRF"); then
+    abort "$org's repos could not be listed: $(oneline "$(cat "$ERRF")")"
+  fi
+  [ -n "$rows" ] || abort "$org listed zero repos — refusing to call that a quiet night"
+  listed="$listed$rows"$'\n'
+done
+for r in $explicit; do
+  case "$r" in
+  */*) listed="$listed$r"$'\n' ;;
+  *) die "scope.repos entry '$r' has no owner (write it as owner/name)" ;;
+  esac
+done
+# Exclusions match either spelling, because a config that lists its own org's
+# repos by bare name and its exclusions the same way is the obvious way to write
+# one, and silently not excluding is the expensive direction to be wrong in.
+repos=$(printf '%s' "$listed" | awk 'NF' | sort -u |
+  jq -Rrn --argjson ex "$(cfgj '.scope.exclude')" '
+    [inputs] | map(select(. as $r | ($ex | any(. == $r or . == ($r | sub("^[^/]+/"; "")))) | not)) | .[]')
+[ -n "$repos" ] || abort "every repo in scope is excluded — refusing to call that a quiet night"
+
+# ── merge + ci, per repo ──────────────────────────────────────────────────────
+merged=0
+method=$(cfg .tier1.mergeMethod)
+base=$(cfg .tier1.base)
+for repo in $repos; do
+  # Listed into a variable rather than iterated through `< <(gh pr list …)`,
+  # because a process substitution's exit status is unreachable: a failed
+  # listing yields zero iterations, and a repo whose PRs were never read is then
+  # indistinguishable from a repo with none open. An empty list is a fact; an
+  # unreadable one is a gap in the pass.
+  if pr_rows=$(gh pr list -R "$repo" -L 100 --json number,title \
+    -q '.[] | [.number, .title] | @tsv' 2>"$ERRF"); then
+    while IFS=$'\t' read -r pr_num title; do
+      [ -n "$pr_num" ] || continue
+      # factory-tier's contract is 0 tier-1 · 3 refused-with-a-reason · 2 usage,
+      # and anything else is `set -e` aborting inside it — most often on a `gh`
+      # call. Those are three answers, not two. "Refused" and "could not be
+      # judged" collapsing into one `queued:` line is the expensive one: a
+      # foreman is told that queued rows need nothing because they are the
+      # morning's by design, so a PR nobody managed to sense gets filed as one
+      # nobody needs to look at.
+      verdict=$("$LIBEXEC/factory-tier" "$repo" "$pr_num" 2>&1); tier_rc=$?
+      case "$tier_rc" in
+      0)
+        if [ "$dry" = 1 ] || [ "$lease_live" = 0 ]; then
+          tag=""; [ "$lease_live" = 0 ] && tag=" (no lease)"
+          say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --argjson l "$([ "$lease_live" = 1 ] && echo true || echo false)" \
+            '{event:"would-merge", repo:$r, number:$n, title:$t, lease:$l}')" \
+            "would-merge: $repo#$pr_num $title$tag"
+        # Pinned to the head SHA the verdict was computed on: a push landing in
+        # the gap makes the merge fail closed to merge-failed, not ride in.
+        elif gh pr merge "$pr_num" -R "$repo" "--$method" \
+          --match-head-commit "${verdict##*head=}" >/dev/null 2>"$ERRF"; then
+          say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg h "${verdict##*head=}" \
+            '{event:"merged", repo:$r, number:$n, title:$t, head:$h}')" "merged: $repo#$pr_num $title"
+          merged=$((merged + 1))
+        else
+          # A failed WRITE is read for the same thing as a failed read, so it
+          # quotes its stderr for the same reason. This one is a verdict, not an
+          # unknown — the pass saw everything and the merge simply did not take —
+          # but "did not take" spans a head that moved under --match-head-commit
+          # (the pin working exactly as designed, and nothing to do) and a token
+          # that expired three hours ago (the shift is over and nobody knows).
+          # Without the reason those are one line.
+          say "$(J --arg r "$repo" --argjson n "$pr_num" --arg e "$(oneline "$(cat "$ERRF")")" \
+            '{event:"merge-failed", repo:$r, number:$n, stderr:$e}')" \
+            "merge-failed: $repo#$pr_num — left open: $(oneline "$(cat "$ERRF")")"
+        fi
+        ;;
+      3)
+        # The verdict line ends in its own `($repo#$num)`, which this line has
+        # already said; stripped so the reason column is the reason alone.
+        why="${verdict#tier: not-1 — }"; why="${why%%  (*}"
+        say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg w "$why" \
+          '{event:"queued", repo:$r, number:$n, title:$t, reason:$w}')" \
+          "queued: $repo#$pr_num $title — $why"
+        ;;
+      *) say "$(J --arg r "$repo" --argjson n "$pr_num" --arg t "$title" --arg e "$(oneline "$verdict")" \
+           '{event:"tier-unknown", repo:$r, number:$n, title:$t, stderr:$e}')" \
+           "tier-unknown: $repo#$pr_num $title — not judged: $(oneline "$verdict")" ;;
+      esac
+    done <<<"$pr_rows"
+  else
+    say "$(J --arg r "$repo" --arg e "$(oneline "$(cat "$ERRF")")" \
+      '{event:"prs-unknown", repo:$r, stderr:$e}')" \
+      "prs-unknown: $repo — its open PRs could not be listed this pass: $(oneline "$(cat "$ERRF")")"
+  fi
+
+  # cancelled is deliberately not red: concurrency groups cancel superseded runs
+  # on every push, and a fixer lane for those would chase ghosts.
+  #
+  # The exit status is read apart from the value, because three unrelated things
+  # arrive as an empty `conclusion` and only one of them is news: a run still
+  # going (nothing to say yet), a repo with no workflow runs at all (same), and
+  # the query failing, which is the shift blind on this repo for the pass.
+  # Silence has to mean "looked, and it is not red", or a red branch inside a
+  # flaky window is reported by omission — and reporting that is the whole
+  # reason this block exists.
+  #
+  # ⚠️ A repo with Actions DISABLED lands here too: `gh run list` exits 1 on its
+  # 404 rather than returning an empty list, so that repo would be `ci-unknown`
+  # on every pass forever. If one is, the answer is `scope.exclude` or an arm
+  # that recognises the 404, never a wider `||`.
+  if run_row=$(gh run list -R "$repo" -b "$base" -L1 \
+    --json conclusion,url -q '.[] | [.conclusion, .url] | @tsv' 2>"$ERRF"); then
+    read -r conclusion url <<<"$run_row"
+    case "${conclusion:-}" in
+    failure | timed_out | startup_failure)
+      say "$(J --arg r "$repo" --arg u "$url" --arg c "$conclusion" \
+        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url"
+      notify fault "CI red on $repo $base" "$url"
+      ;;
+    esac
+  else
+    say "$(J --arg r "$repo" --arg e "$(oneline "$(cat "$ERRF")")" \
+      '{event:"ci-unknown", repo:$r, stderr:$e}')" \
+      "ci-unknown: $repo — $base's latest run not read: $(oneline "$(cat "$ERRF")")"
+  fi
+  conclusion=""; url=""
+done
+
+# ── after merge ───────────────────────────────────────────────────────────────
+# WHICH command stopped is half the report — one that leaves the tree behind
+# origin and one that leaves it current with something else undone want
+# different mornings — so the line names the command rather than the hook.
+if [ "$merged" -gt 0 ] && [ "$dry" = 0 ]; then
+  workdir=$(cfg '.afterMerge.workdir // ""')
+  # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
+  case "$workdir" in "~/"*) workdir="$HOME/${workdir#\~/}" ;; esac
+  stopped=""
+  ran=0
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    ran=$((ran + 1))
+    if ! (cd "${workdir:-$PWD}" && bash -c "$cmd") >/dev/null 2>"$ERRF"; then
+      stopped="$cmd"; break
+    fi
+  done < <(cfg '.afterMerge.commands[]?')
+  if [ -n "$stopped" ]; then
+    say "$(J --arg c "$stopped" --arg e "$(oneline "$(cat "$ERRF")")" \
+      '{event:"after-merge-failed", command:$c, stderr:$e}')" \
+      "after-merge-failed: $stopped — run it by hand in the morning: $(oneline "$(cat "$ERRF")")"
+    notify fault "factory: after-merge hook failed after $merged merge(s)"
+  elif [ "$ran" -gt 0 ]; then
+    say "$(J --argjson n "$ran" --argjson m "$merged" '{event:"after-merge", commands:$n, merged:$m}')" \
+      "after-merge: $ran command(s) ok after $merged merge(s)"
+  fi
+fi
+
+say "$(J --argjson m "$merged" '{event:"pass-done", merged:$m}')" "pass done: $merged merged"
+[ "$merged" -gt 0 ] && notify "done" "factory: merged $merged tier-1 PR(s)"
+exit 0

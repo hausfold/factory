@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# factory — merge the PRs code alone can vouch for, while nobody is watching.
+#
+# One dispatcher over four verbs that each do one thing and log every act:
+#   lease      the standing merge grant this machine's owner types
+#   tier       is one PR mergeable unattended, by policy rather than judgement
+#   shift      one pass: sense, merge tier 1, report the rest
+#   watchdog   notice that the foreman died, which no pass can report
+#
+# Everything else here is the surface around them: `config`, `doctor`, `skill`.
+# shellcheck source-path=SCRIPTDIR/..
+set -euo pipefail
+
+FACTORY_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export FACTORY_HOME
+LIBEXEC="$FACTORY_HOME/libexec"
+
+usage() {
+  cat <<'EOF'
+factory — merge the PRs code alone can vouch for, while nobody is watching.
+
+usage:
+  factory lease grant <30m|12h|2d>    take tier-1 merge authority until then
+  factory lease status [--json]       0 live · 1 none/expired
+  factory lease revoke
+
+  factory shift [--dry-run] [--json]  one pass: sense, merge, report
+  factory tier <repo> <n> [--json]    is one PR tier 1?  0 yes · 3 no
+
+  factory watchdog once|ensure [--json]   is the foreman alive?
+  factory watchdog run|stop               the poller itself
+
+  factory config print [--json]       the EFFECTIVE policy, defaults included
+  factory config path                 where that file is read from
+  factory config init                 write a starter config there
+  factory doctor                      is this machine able to run a shift?
+
+  factory skill [<name>]              print the agent skill
+  factory skill install [--client claude|codex|opencode|pi] [--dir PATH]
+
+  factory --help · --version
+
+exit codes
+  0  ok / tier 1 / healthy       3  refused (not tier 1) · stalled foreman
+  1  nothing (no lease) · pass   4  live lease with no poller watching it
+     aborted                     2  usage, or a config that cannot be used
+
+The policy lives in one machine-local file — `factory config path` — because a
+copy inside a watched repo would be a file a PR could edit to widen the filter
+that judges it. Full design: https://github.com/hausfold/factory
+EOF
+}
+
+# `skill install` needs the same client table twice, so it is written once here.
+# Each client reads skills from its own directory; the layout inside is the
+# same for all of them (<dir>/<skill name>/SKILL.md).
+client_dir() {
+  case "$1" in
+  claude) echo "$HOME/.claude/skills" ;;
+  codex) echo "$HOME/.codex/skills" ;;
+  opencode) echo "$HOME/.config/opencode/skills" ;;
+  pi) echo "$HOME/.pi/agent/skills" ;;
+  *) return 1 ;;
+  esac
+}
+
+cmd_skill() {
+  local sub="${1:-}"
+  case "$sub" in
+  "") : ;;
+  install) shift; cmd_skill_install "$@"; return ;;
+  -*) echo "factory: skill takes a name or 'install', not '$sub'" >&2; exit 2 ;;
+  esac
+  # A named skill is a sibling directory; the tool's own is `ai/SKILL.md`.
+  local path="$FACTORY_HOME/ai/SKILL.md"
+  [ -z "${1:-}" ] || path="$FACTORY_HOME/ai/$1/SKILL.md"
+  [ -f "$path" ] || { echo "factory: no such skill '${1:-factory}'" >&2; exit 2; }
+  cat "$path"
+}
+
+cmd_skill_install() {
+  local dir="" client="" wrote=0 skipped=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --dir) dir="${2:-}"; shift 2 ;;
+    --client) client="${2:-}"; shift 2 ;;
+    *) echo "factory: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  local -a targets=()
+  if [ -n "$dir" ]; then
+    targets=("$dir")
+  elif [ -n "$client" ]; then
+    local d
+    d="$(client_dir "$client")" || { echo "factory: unknown client '$client'" >&2; exit 2; }
+    targets=("$d")
+  else
+      local c d
+    for c in claude codex opencode pi; do
+      d="$(client_dir "$c")"
+      [ -d "$(dirname "$d")" ] && targets+=("$d")
+    done
+  fi
+  [ "${#targets[@]}" -gt 0 ] || { echo "factory: no agent client found — name one with --client or --dir" >&2; exit 2; }
+
+  # Every skill this tool ships, discovered rather than listed: a tool that
+  # ships a second skill and installs only its first reaches no standalone user
+  # with it.
+  local src name dest t
+  for t in "${targets[@]}"; do
+    for src in "$FACTORY_HOME/ai/SKILL.md" "$FACTORY_HOME"/ai/*/SKILL.md; do
+      [ -f "$src" ] || continue
+      name=factory
+      [ "$src" = "$FACTORY_HOME/ai/SKILL.md" ] || name="$(basename "$(dirname "$src")")"
+      dest="$t/$name/SKILL.md"
+      # A haus machine has already installed this, as a read-only Nix symlink.
+      # Say so, rather than making the user work it out from an EPERM.
+      if [ -L "$t/$name" ] || [ -L "$dest" ]; then
+        echo "skipped $dest — a symlink, so something else manages it (on a haus machine, haus.ai.skill already did)"
+        skipped=$((skipped + 1)); continue
+      fi
+      if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
+        echo "skipped $dest — exists and differs; diff it against $src"
+        skipped=$((skipped + 1)); continue
+      fi
+      mkdir -p "$(dirname "$dest")"
+      cp "$src" "$dest"
+      echo "wrote $dest"
+      wrote=$((wrote + 1))
+    done
+  done
+  echo "skills: $wrote written, $skipped left alone"
+}
+
+cmd_config() {
+  # shellcheck source=lib/common.sh
+  . "$FACTORY_HOME/lib/common.sh"
+  case "${1:-print}" in
+  path) echo "$FACTORY_CONFIG_PATH" ;;
+  print)
+    factory_load
+    if [ "${2:-}" = "--json" ]; then
+      printf '%s\n' "$FACTORY_CFG" | jq .
+    else
+      # The effective policy, defaults included, plus the floor the config
+      # cannot lower — so what `print` shows is what `tier` will actually do.
+      printf '%s\n' "$FACTORY_CFG" |
+        jq -r --argjson floor "$FACTORY_FLOOR_DENY" --arg p "$FACTORY_CONFIG_PATH" --arg d "$(factory_policy_digest)" '
+          "config: \($p)",
+          "digest: \($d)",
+          "",
+          "scope    orgs \(.scope.orgs | join(", ") | if . == "" then "-" else . end)  repos \(.scope.repos | length)  excluded \(.scope.exclude | length)",
+          "tier1    \(.tier1.head) → \(.tier1.base), authors \(.tier1.authors | join(",")), ≤\(.tier1.maxLines) lines, green=\(.tier1.requireGreen), merge=\(.tier1.mergeMethod)",
+          "  allow  \(.tier1.allow | join("  "))",
+          "  deny   \((.tier1.deny + $floor) | join("  "))",
+          "budget   \(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
+          "after    \(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
+          "notify   \(.notify.mode), source \(.notify.source)",
+          "watchdog stale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
+    fi
+    ;;
+  init)
+    if [ -f "$FACTORY_CONFIG_PATH" ]; then
+      echo "factory: $FACTORY_CONFIG_PATH already exists — edit it, or delete it first" >&2
+      exit 2
+    fi
+    mkdir -p "$(dirname "$FACTORY_CONFIG_PATH")"
+    cp "$FACTORY_HOME/share/config.example.json" "$FACTORY_CONFIG_PATH"
+    echo "wrote $FACTORY_CONFIG_PATH — edit scope, then run: factory doctor"
+    ;;
+  *) echo "usage: factory config print [--json] | path | init" >&2; exit 2 ;;
+  esac
+}
+
+cmd_doctor() {
+  # shellcheck source=lib/common.sh
+  . "$FACTORY_HOME/lib/common.sh"
+  local bad=0 warn=0
+  ok()   { echo "  ok    $*"; }
+  note() { echo "  note  $*"; warn=$((warn + 1)); }
+  bad()  { echo "  BAD   $*"; bad=$((bad + 1)); }
+
+  echo "factory $FACTORY_VERSION — $FACTORY_HOME"
+  echo
+  echo "tools"
+  if have jq; then ok "jq $(jq --version 2>/dev/null)"; else bad "jq is missing (brew install jq)"; fi
+  if have gh; then
+    if gh auth status >/dev/null 2>&1; then ok "gh authenticated as $(gh api user -q .login 2>/dev/null || echo '?')"
+    else bad "gh is installed but not authenticated (gh auth login)"; fi
+  else
+    bad "gh is missing (brew install gh) — every verb needs it"
+  fi
+
+  echo
+  echo "config"
+  if [ -f "$FACTORY_CONFIG_PATH" ]; then ok "$FACTORY_CONFIG_PATH"
+  else note "$FACTORY_CONFIG_PATH does not exist — running on defaults (factory config init)"; fi
+  factory_load
+  local n_orgs n_repos
+  n_orgs=$(cfg '.scope.orgs | length'); n_repos=$(cfg '.scope.repos | length')
+  if [ "$n_orgs" = 0 ] && [ "$n_repos" = 0 ]; then
+    bad "scope names no orgs and no repos — a shift would have nothing to walk"
+  else
+    ok "scope: $n_orgs org(s), $n_repos explicit repo(s)"
+  fi
+  ok "policy digest $(factory_policy_digest)"
+
+  echo
+  echo "budget"
+  local mode feed
+  mode=$(cfg .budget.mode); feed=$(cfg '.budget.feed // ""')
+  # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
+  case "$feed" in "~/"*) feed="$HOME/${feed#\~/}" ;; esac
+  if [ "$mode" = unmetered ]; then
+    note "unmetered by config — every pass says fixer: yes"
+  elif [ -z "$feed" ]; then
+    note "no budget.feed configured — every pass says fixer: no (budget unknown)"
+  elif [ -s "$feed" ]; then
+    ok "feed $feed"
+  else
+    note "budget.feed $feed is missing or empty — fixer lanes stay refused"
+  fi
+
+  echo
+  echo "after merge"
+  local wd n_cmd
+  wd=$(cfg '.afterMerge.workdir // ""'); n_cmd=$(cfg '.afterMerge.commands | length')
+  # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
+  case "$wd" in "~/"*) wd="$HOME/${wd#\~/}" ;; esac
+  if [ "$n_cmd" = 0 ]; then note "no afterMerge commands — merges land and nothing follows"
+  elif [ -n "$wd" ] && [ ! -d "$wd" ]; then bad "afterMerge.workdir does not exist: $wd"
+  elif [ -n "$wd" ]; then ok "$n_cmd command(s) in $wd"
+  else ok "$n_cmd command(s) in the current directory"; fi
+
+  echo
+  echo "state"
+  if mkdir -p "$FACTORY_STATE_DIR" 2>/dev/null && [ -w "$FACTORY_STATE_DIR" ]; then
+    ok "$FACTORY_STATE_DIR"
+  else
+    bad "state dir is not writable: $FACTORY_STATE_DIR"
+  fi
+  # A machine that ran the workshop's in-repo ancestor has its logs and its
+  # lease under the old path. Nothing reads them any more, and a shift that
+  # silently started a fresh history is exactly the kind of quiet this tool is
+  # built not to be.
+  local legacy="$HOME/.cache/hausfold-factory"
+  [ ! -d "$legacy" ] || note "$legacy holds an older factory's state — nothing reads it now; delete it when you have read its logs"
+  "$LIBEXEC/factory-lease" status || true
+  "$LIBEXEC/factory-watchdog" once || true
+
+  echo
+  if [ "$bad" -gt 0 ]; then echo "doctor: $bad blocking, $warn to note"; return 2; fi
+  if [ "$warn" -gt 0 ]; then echo "doctor: ready, $warn to note"; return 1; fi
+  echo "doctor: ready"
+}
+
+case "${1:-}" in
+lease | tier | shift | watchdog)
+  verb="$1"; shift
+  exec "$LIBEXEC/factory-$verb" "$@"
+  ;;
+config) shift; cmd_config "$@" ;;
+doctor) shift; cmd_doctor "$@" ;;
+skill) shift; cmd_skill "$@" ;;
+-h | --help | help | "") usage ;;
+-V | --version | version) cat "$FACTORY_HOME/VERSION" ;;
+*)
+  echo "factory: unknown verb '$1'" >&2
+  echo "try: factory --help" >&2
+  exit 2
+  ;;
+esac
