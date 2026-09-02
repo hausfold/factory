@@ -3,8 +3,8 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-  # snug is the family's presentation runtime — the standard is the workshop's
-  # `docs/cli-presentation.md`, and this is the half a bash caller can reach.
+  # snug is the family's presentation runtime, and its own README and AGENTS.md
+  # are the standard. `share/ui.sh` is the half a bash caller can reach.
   # factory reads `share/ui.sh` off snug's store path, the way haus does, and
   # that path is all it takes: `bin/snug` is NOT put on PATH here, because the
   # binary's one advantage over the fallback is a live region drawn from a
