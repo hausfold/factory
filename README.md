@@ -145,12 +145,42 @@ for a morning that added nothing to reading it in the PR.
 the clause fails it — because a deny clause that stops matching has no symptom
 until a PR someone meant to see merges at 3 a.m.
 
+### `tier1.allow` is a path rule, not a claim about prose
+
+`^docs/` and `\.md$` are shapes. Neither says the file was written by a person,
+and in a repo that commits a **generated** surface — an options reference built
+from source, a table re-rendered from a manifest, a doc some `make docs` writes
+— that surface matches wherever it sits, and a PR carrying only it is tier 1.
+
+That is usually fine, and it is fine for a reason outside this tool: a
+regeneration normally rides with whatever caused it, and the thing that caused
+it does not match `tier1.allow`, so the PR is refused on a path. What can arrive
+alone is the catch-up regen, and merging that unread is the case tier 1 is for.
+
+**What keeps a generated surface honest is a drift check in the repo that holds
+it, never the filter.** If the committed copy and its generator can disagree
+without anything failing, `tier1.allow` will merge the disagreement — so before
+you widen the allow list over a directory, know which test re-renders what is in
+it. A generated directory with no drift check is not a docs directory; it is a
+build artefact that happens to be markdown.
+
 ### `requireGreen`
 
 `if-present` (the default) forgives a PR that reported no checks, because plenty
 of docs repos run no CI on pull requests at all. Set it to `always` where CI is
 the whole verification story: there, a workflow that failed to *trigger* is
 indistinguishable from one that passed, and `always` refuses to guess.
+
+**`always` can require that a check exists, not that a relevant one ran**, and
+that is the distinction to settle before setting it. In a repo whose
+`pull_request` workflows are all path-filtered, no filter is obliged to name the
+paths `tier1.allow` matches — and the two lists are commonly drawn for opposite
+reasons and land on the same line, because what a build watches is what it
+builds and what tier 1 reaches is what it does not. There, `always` does not
+choose between a verified merge and an unverified one; it refuses every tier-1
+PR the repo will ever have, permanently. Where no workflow will trigger, what
+stands in for CI is `tier1.head` and `tier1.authors` — a branch shape and an
+author you decided to trust — and that is worth knowing you are leaning on.
 
 ---
 
