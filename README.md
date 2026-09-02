@@ -145,12 +145,47 @@ for a morning that added nothing to reading it in the PR.
 the clause fails it — because a deny clause that stops matching has no symptom
 until a PR someone meant to see merges at 3 a.m.
 
+### `tier1.allow` is a path rule, not a claim about prose
+
+`^docs/` and `\.md$` are shapes. Neither says the file was written by a person,
+and in a repo that commits a **generated** surface — an options reference built
+from source, a table re-rendered from a manifest, a doc some `make docs` writes
+— that surface is matched by its path like any other, and `\.md$` matches it
+wherever in the tree it sits. A PR carrying only it clears `tier1.allow`.
+
+That is usually fine, and it is fine for a reason outside this tool: a
+regeneration normally rides with whatever caused it, and the thing that caused
+it does not match `tier1.allow`, so the PR is refused on a path. What can arrive
+alone is the catch-up regen, and merging that unread is the case tier 1 is for.
+
+**What keeps a generated surface honest is a drift check in the repo that holds
+it, never the filter.** If the committed copy and its generator can disagree
+without anything failing, `tier1.allow` will merge the disagreement — so before
+you widen the allow list over a directory, know which test re-renders what is in
+it. A generated directory with no drift check is not a docs directory; it is a
+build artefact that happens to be markdown.
+
 ### `requireGreen`
 
 `if-present` (the default) forgives a PR that reported no checks, because plenty
 of docs repos run no CI on pull requests at all. Set it to `always` where CI is
 the whole verification story: there, a workflow that failed to *trigger* is
 indistinguishable from one that passed, and `always` refuses to guess.
+
+**`always` can require that a check exists, not that a relevant one ran**, and
+that is the distinction to settle before setting it. The rollup it reads is
+keyed on the head commit, so any workflow or status app that reports on that SHA
+satisfies it whatever the diff was — a `push` build on a same-repo branch
+included. What it cannot do is notice that nothing which ran had an opinion
+about the changed files. And where every trigger in the repo is path-filtered,
+no filter is obliged to name the paths `tier1.allow` matches: the two lists are
+commonly drawn for opposite reasons and land on the same line, because what a
+build watches is what it builds and what tier 1 reaches is what it does not.
+There, `always` does not choose between a verified merge and an unverified one;
+it refuses every tier-1 PR the repo has, for as long as no trigger reaches those
+paths. What stands in for CI there is `tier1.head` and `tier1.authors` — a
+branch shape and an author you decided to trust — and that is worth knowing you
+are leaning on.
 
 ---
 
@@ -306,7 +341,7 @@ turns it on for a pipe, and `dumb` beats even that.
 ## Development
 
 ```sh
-bats test/                                    # 118 cases
+bats test/                                    # 120 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.
