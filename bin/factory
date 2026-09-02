@@ -38,7 +38,7 @@ usage:
   factory config print [--json]       the EFFECTIVE policy, defaults included
   factory config path                 where that file is read from
   factory config init                 write a starter config there
-  factory doctor                      is this machine able to run a shift?
+  factory doctor [--json]             is this machine able to run a shift?
 
   factory skill [<name>]              print the agent skill
   factory skill install [--client claude|codex|opencode|pi] [--dir PATH]
@@ -140,13 +140,28 @@ cmd_skill_install() {
 cmd_config() {
   # shellcheck source=lib/common.sh
   . "$FACTORY_HOME/lib/common.sh"
-  case "${1:-print}" in
+  local sub=print
+  if [ $# -gt 0 ]; then sub="$1"; shift; fi
+  case "$sub" in
   # A path a caller captures — `cd "$(dirname "$(factory config path)")"` is the
   # whole reason stdout carries data only. Never painted, never marked.
-  path) out_data "$FACTORY_CONFIG_PATH" ;;
+  path)
+    [ $# -eq 0 ] || die "config path takes no flags, not '$1'"
+    out_data "$FACTORY_CONFIG_PATH" ;;
   print)
+    # Parsed, so an unknown flag is REFUSED rather than ignored: this used to
+    # compare $2 against `--json` and fall through to the human table for
+    # anything else, which is the same swallow `doctor` had.
+    local json=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+      --json) json=1 ;;
+      *) die "config print takes --json, not '$1'" ;;
+      esac
+      shift
+    done
     factory_load
-    if [ "${2:-}" = "--json" ]; then
+    if [ "$json" = 1 ]; then
       printf '%s\n' "$FACTORY_CFG" | jq .
     else
       # The effective policy, defaults included, plus the floor the config
@@ -185,6 +200,7 @@ cmd_config() {
     fi
     ;;
   init)
+    [ $# -eq 0 ] || die "config init takes no flags, not '$1'"
     [ ! -f "$FACTORY_CONFIG_PATH" ] ||
       die "$FACTORY_CONFIG_PATH already exists — edit it, or delete it first"
     mkdir -p "$(dirname "$FACTORY_CONFIG_PATH")"
@@ -199,85 +215,160 @@ cmd_config() {
 cmd_doctor() {
   # shellcheck source=lib/common.sh
   . "$FACTORY_HOME/lib/common.sh"
-  local bad=0 warn=0
-  # The mark carries the state and the colour is the courtesy: a doctor read
-  # through `NO_COLOR`, a pipe or a dumb terminal still sorts ✓ from ✗.
-  ok()   { out_ok   "$*"; }
-  note() { out_warn "$*"; warn=$((warn + 1)); }
-  bad()  { out_bad  "$*"; bad=$((bad + 1)); }
+  local json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --json) json=1 ;;
+    # A flag nobody parses is worse than a flag nobody has: an agent that
+    # passes one and is handed prose cannot tell "this verb has no JSON" from
+    # "the JSON is malformed". Refused on fd 2, with nothing on fd 1.
+    *) die "doctor takes --json, not '$1'" ;;
+    esac
+    shift
+  done
 
-  out_head "factory $FACTORY_VERSION — $FACTORY_HOME"
-  echo
-  out_head "tools"
-  if have jq; then ok "jq $(jq --version 2>/dev/null)"; else bad "jq is missing (brew install jq)"; fi
+  local bad=0 warn=0 section=""
+  local -a checks=()
+  # Unknown until the state section asks, and named rather than empty if it
+  # never gets an answer: a doctor that could not read the lease must not emit
+  # the document a machine with no lease emits.
+  local lease_json='{"error":"lease-unknown"}' wd_json='{"error":"watchdog-unknown"}'
+
+  # One check, recorded once and rendered for whichever reader asked.
+  #
+  # The mark carries the state and the colour is the courtesy: a doctor read
+  # through `NO_COLOR`, a pipe or a dumb terminal still sorts ✓ from ✗. Under
+  # `--json` that same state is a FIELD and the painter is never reached at
+  # all — a JSON report bypasses `out_*` rather than stripping escapes back out
+  # of it, which is what keeps `doctor --json` identical on a machine with snug
+  # and a clone-and-symlink install without it.
+  chk() { # chk <ok|warn|bad> <check id> <line...>
+    local state="$1" id="$2"; shift 2
+    case "$state" in
+    warn) warn=$((warn + 1)) ;;
+    bad) bad=$((bad + 1)) ;;
+    esac
+    if [ "$json" = 1 ]; then
+      checks+=("$(jq -nc --arg s "$section" --arg c "$id" --arg st "$state" --arg l "$*" \
+        '{section: $s, check: $c, state: $st, line: $l}')")
+    else
+      case "$state" in
+      ok) out_ok "$*" ;;
+      warn) out_warn "$*" ;;
+      bad) out_bad "$*" ;;
+      esac
+    fi
+  }
+  # The head names the section and the section names itself in the JSON, so the
+  # two readers can never be given different groupings of the same checks.
+  sec()  { section="$1"; [ "$json" = 1 ] || { echo; out_head "$1"; }; }
+  ok()   { chk ok   "$@"; }
+  note() { chk warn "$@"; }
+  bad()  { chk bad  "$@"; }
+
+  [ "$json" = 1 ] || out_head "factory $FACTORY_VERSION — $FACTORY_HOME"
+
+  sec tools
+  if have jq; then ok jq "jq $(jq --version 2>/dev/null)"; else bad jq "jq is missing (brew install jq)"; fi
   if have gh; then
-    if gh auth status >/dev/null 2>&1; then ok "gh authenticated as $(gh api user -q .login 2>/dev/null || echo '?')"
-    else bad "gh is installed but not authenticated (gh auth login)"; fi
+    if gh auth status >/dev/null 2>&1; then ok gh "gh authenticated as $(gh api user -q .login 2>/dev/null || echo '?')"
+    else bad gh "gh is installed but not authenticated (gh auth login)"; fi
   else
-    bad "gh is missing (brew install gh) — every verb needs it"
+    bad gh "gh is missing (brew install gh) — every verb needs it"
   fi
 
-  echo
-  out_head "config"
-  if [ -f "$FACTORY_CONFIG_PATH" ]; then ok "$FACTORY_CONFIG_PATH"
-  else note "$FACTORY_CONFIG_PATH does not exist — running on defaults (factory config init)"; fi
+  sec config
+  if [ -f "$FACTORY_CONFIG_PATH" ]; then ok config-file "$FACTORY_CONFIG_PATH"
+  else note config-file "$FACTORY_CONFIG_PATH does not exist — running on defaults (factory config init)"; fi
   factory_load
   local n_orgs n_repos
   n_orgs=$(cfg '.scope.orgs | length'); n_repos=$(cfg '.scope.repos | length')
   if [ "$n_orgs" = 0 ] && [ "$n_repos" = 0 ]; then
-    bad "scope names no orgs and no repos — a shift would have nothing to walk"
+    bad scope "scope names no orgs and no repos — a shift would have nothing to walk"
   else
-    ok "scope: $n_orgs org(s), $n_repos explicit repo(s)"
+    ok scope "scope: $n_orgs org(s), $n_repos explicit repo(s)"
   fi
-  ok "policy digest $(factory_policy_digest)"
+  ok digest "policy digest $(factory_policy_digest)"
 
-  echo
-  out_head "budget"
+  sec budget
   local mode feed
   mode=$(cfg .budget.mode); feed=$(cfg '.budget.feed // ""')
   # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
   case "$feed" in "~/"*) feed="$HOME/${feed#\~/}" ;; esac
   if [ "$mode" = unmetered ]; then
-    note "unmetered by config — every pass says fixer: yes"
+    note budget "unmetered by config — every pass says fixer: yes"
   elif [ -z "$feed" ]; then
-    note "no budget.feed configured — every pass says fixer: no (budget unknown)"
+    note budget "no budget.feed configured — every pass says fixer: no (budget unknown)"
   elif [ -s "$feed" ]; then
-    ok "feed $feed"
+    ok budget "feed $feed"
   else
-    note "budget.feed $feed is missing or empty — fixer lanes stay refused"
+    note budget "budget.feed $feed is missing or empty — fixer lanes stay refused"
   fi
 
-  echo
-  out_head "after merge"
+  sec "after merge"
   local wd n_cmd
   wd=$(cfg '.afterMerge.workdir // ""'); n_cmd=$(cfg '.afterMerge.commands | length')
   # shellcheck disable=SC2088 # a literal tilde out of the config, expanded here
   case "$wd" in "~/"*) wd="$HOME/${wd#\~/}" ;; esac
-  if [ "$n_cmd" = 0 ]; then note "no afterMerge commands — merges land and nothing follows"
-  elif [ -n "$wd" ] && [ ! -d "$wd" ]; then bad "afterMerge.workdir does not exist: $wd"
-  elif [ -n "$wd" ]; then ok "$n_cmd command(s) in $wd"
-  else ok "$n_cmd command(s) in the current directory"; fi
+  if [ "$n_cmd" = 0 ]; then note after-merge "no afterMerge commands — merges land and nothing follows"
+  elif [ -n "$wd" ] && [ ! -d "$wd" ]; then bad after-merge "afterMerge.workdir does not exist: $wd"
+  elif [ -n "$wd" ]; then ok after-merge "$n_cmd command(s) in $wd"
+  else ok after-merge "$n_cmd command(s) in the current directory"; fi
 
-  echo
-  out_head "state"
+  sec state
   if mkdir -p "$FACTORY_STATE_DIR" 2>/dev/null && [ -w "$FACTORY_STATE_DIR" ]; then
-    ok "$FACTORY_STATE_DIR"
+    ok state-dir "$FACTORY_STATE_DIR"
   else
-    bad "state dir is not writable: $FACTORY_STATE_DIR"
+    bad state-dir "state dir is not writable: $FACTORY_STATE_DIR"
   fi
   # A machine that ran the workshop's in-repo ancestor has its logs and its
   # lease under the old path. Nothing reads them any more, and a shift that
   # silently started a fresh history is exactly the kind of quiet this tool is
   # built not to be.
   local legacy="$HOME/.cache/hausfold-factory"
-  [ ! -d "$legacy" ] || note "$legacy holds an older factory's state — nothing reads it now; delete it when you have read its logs"
-  "$LIBEXEC/factory-lease" status || true
-  "$LIBEXEC/factory-watchdog" once || true
+  [ ! -d "$legacy" ] || note legacy-state "$legacy holds an older factory's state — nothing reads it now; delete it when you have read its logs"
+  # The two sub-verbs report themselves. Under `--json` they are ASKED in JSON
+  # and nested whole, never scraped: one verb does not parse another's human
+  # line, and their objects are already the contract a caller reads.
+  if [ "$json" = 1 ]; then
+    local sub
+    sub=$("$LIBEXEC/factory-lease" status --json 2>/dev/null) || true
+    if jq -e . >/dev/null 2>&1 <<<"${sub:-}"; then lease_json="$sub"; fi
+    sub=$("$LIBEXEC/factory-watchdog" once --json 2>/dev/null) || true
+    if jq -e . >/dev/null 2>&1 <<<"${sub:-}"; then wd_json="$sub"; fi
+  else
+    "$LIBEXEC/factory-lease" status || true
+    "$LIBEXEC/factory-watchdog" once || true
+  fi
+
+  # One verdict, one exit code, computed once so the two renderings cannot
+  # disagree about whether this machine is ready.
+  local rc=0 line="doctor: ready"
+  if [ "$bad" -gt 0 ]; then rc=2; line="doctor: $bad blocking, $warn to note"
+  elif [ "$warn" -gt 0 ]; then rc=1; line="doctor: ready, $warn to note"; fi
+
+  if [ "$json" = 1 ]; then
+    # Into a variable first, so a jq that failed cannot leave a doctor printing
+    # nothing and exiting 0 — the whole report is the claim here.
+    local doc
+    doc=$(printf '%s\n' ${checks[@]+"${checks[@]}"} |
+      jq -s --arg v "$FACTORY_VERSION" --arg h "$FACTORY_HOME" --arg l "$line" \
+        --argjson blocking "$bad" --argjson notes "$warn" --argjson exit "$rc" \
+        --argjson lease "$lease_json" --argjson watchdog "$wd_json" \
+        '{version: $v, home: $h, ready: ($blocking == 0), blocking: $blocking,
+          notes: $notes, exit: $exit, line: $l, checks: ., lease: $lease,
+          watchdog: $watchdog}') || die "doctor could not build its JSON report"
+    out_data "$doc"
+    return "$rc"
+  fi
 
   echo
-  if [ "$bad" -gt 0 ]; then out_bad "doctor: $bad blocking, $warn to note"; return 2; fi
-  if [ "$warn" -gt 0 ]; then out_warn "doctor: ready, $warn to note"; return 1; fi
-  out_ok "doctor: ready"
+  case "$rc" in
+  2) out_bad "$line" ;;
+  1) out_warn "$line" ;;
+  *) out_ok "$line" ;;
+  esac
+  return "$rc"
 }
 
 case "${1:-}" in

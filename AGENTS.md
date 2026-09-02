@@ -65,6 +65,13 @@ that comes from the user's config, always.
   standard is `hausfold/snug`'s README and AGENTS.md; `test/presentation.bats`
   is what holds factory to it, including a blanket ban on a literal escape
   anywhere in `bin/`, `libexec/` or `lib/`.
+- **A flag a verb does not implement is refused, never ignored.** `doctor
+  --json` printed the human checklist and exited 0 for as long as `cmd_doctor`
+  never looked at `$@`, and an agent handed prose back cannot tell "this verb
+  has no JSON" from "the JSON is malformed". Every verb parses its own flags and
+  dies on one it does not know — on fd 2, with nothing on fd 1.
+  `test/agent-surface.bats` is what holds the dispatcher to that, and a new flag
+  belongs in the same edit as the case that proves the old ones still refuse.
 - **One verb never parses another's human line.** `shift` asks `tier` and
   `lease` for `--json` and reads fields out of it. The human line carries a mark
   in its gutter and is folded to the window; both are presentation, and both

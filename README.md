@@ -57,8 +57,11 @@ Plus the surface around them: `factory config print`, `factory doctor`,
 | **3** | refused (not tier 1) · foreman stalled |
 | **4** | a live lease with no poller watching it |
 
-Every read verb takes `--json`. `factory shift --json` emits one JSON object
-per event on stdout while the human log stays human.
+Every read verb takes `--json`, `doctor` included — the checklist comes back as
+one document whose `checks[]` carry a stable `check` id, so a report form or an
+agent reads the same verdict a person does. `factory shift --json` emits one
+JSON object per event on stdout while the human log stays human. A verb that
+does not know a flag refuses it on stderr rather than ignoring it.
 
 ---
 
@@ -298,7 +301,7 @@ turns it on for a pipe, and `dumb` beats even that.
 ## Development
 
 ```sh
-bats test/                                    # 102 cases
+bats test/                                    # 118 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

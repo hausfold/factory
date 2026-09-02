@@ -40,8 +40,17 @@ ui_load
 # run and every `./bin/factory` a contributor types — has no wrapper and so no
 # `FACTORY_UI_SH`, and must degrade rather than die. ui.sh sets its own gates at
 # load; never assume one, hence the `:=` below and not a bare read.
+#
+# 🚨 The probe is `ui_fail`, and it has to be something the FALLBACK below does
+# not define. This file is sourced TWICE in one process — `bin/factory` sources
+# it up front so `--help` draws without `jq`, and `cmd_config`/`cmd_doctor` then
+# source `common.sh`, which sources it again. Probing `ui_paint_role` found the
+# fallback's own stub on that second pass, declared snug present on a machine
+# that has none, and sent `fail`/`hint`/`die` into a `ui_fail: command not
+# found` — a refusal that crashed instead of printing. `ui_fail` is snug's and
+# only snug's, so the answer is the same on every source.
 UI_READY=""
-type ui_paint_role >/dev/null 2>&1 && UI_READY=1
+type ui_fail >/dev/null 2>&1 && UI_READY=1
 : "${UI_OUT_AVAIL:=0}"
 
 # The marks are literals here, and that is deliberate: the ROLE comes from snug
