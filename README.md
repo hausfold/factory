@@ -127,14 +127,19 @@ prose even when they are markdown:
 
 | never tier 1 | why |
 |---|---|
-| `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, any `SKILL.md` | a merged steering file changes how every agent on the machine behaves. That is policy, and a policy change meets a person |
 | `.github/` | a workflow merged unattended is arbitrary code running with the repo's own token |
 | `.claude/`, `.agents/`, `.codex/`, `.cursor/`, `.gemini/`, `.opencode/` | the same argument, one directory per client |
 | `content/` | a repo whose default branch deploys a site turns a docs merge into a *publish*, and a user-facing publish is always gated |
 | anything **renamed** | a rename is a delete wearing a docs name |
 
-The deny tests are case-insensitive because APFS is: a merged `docs/claude.md`
-is what a tool opening `docs/CLAUDE.md` actually reads.
+The deny tests are case-insensitive because APFS is: a merged
+`.GitHub/workflows/x.yml` is what Actions actually runs.
+
+Agent-steering files — `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md` — are
+**not** on this list. They are ordinary policy: put them in `tier1.deny` to hold
+them, leave them out to let a docs pass merge them. On a machine whose worktree
+PRs are its owner's own edits to its own instructions, a floor there queued work
+for a morning that added nothing to reading it in the PR.
 
 `test/factory-tier.bats` has a case per clause, each written so that deleting
 the clause fails it — because a deny clause that stops matching has no symptom

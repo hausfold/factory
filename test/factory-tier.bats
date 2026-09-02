@@ -165,10 +165,6 @@ pr() {
     [ "$status" -eq 3 ] || { echo "not refused: $path"; false; }
     [[ "$output" == *"touches $path"* ]] || { echo "wrong reason for $path: $output"; false; }
   done <<'EOF'
-AGENTS.md|AGENTS.md
-CLAUDE.md|docs/CLAUDE.md
-GEMINI.md|GEMINI.md
-SKILL.md|ai/SKILL.md
 .github/|.github/ISSUE_TEMPLATE/bug.md
 .claude/|.claude/notes.md
 .agents/|.agents/README.md
@@ -192,15 +188,39 @@ EOF
   [[ "$output" == *"touches .github/workflows/release.yml"* ]]
 }
 
-@test "the agent-steering denies are case-insensitive, because APFS is" {
-  # A merged docs/claude.md IS what a tool opening docs/CLAUDE.md reads on this
-  # machine, so a lowercase spelling is the same policy change wearing a name
-  # a case-sensitive filter does not recognise.
-  files "docs/agents.md"
+@test "the floor's denies are case-insensitive, because APFS is" {
+  # A merged .GitHub/workflows/x.yml IS what Actions runs on this machine, so
+  # an odd spelling is the same workflow change wearing a name a case-sensitive
+  # filter does not recognise.
+  files ".GitHub/workflows/release.yml"
   pr
   run "$TIER" perch 7
   [ "$status" -eq 3 ]
-  [[ "$output" == *"touches docs/agents.md"* ]]
+  [[ "$output" == *"touches .GitHub/workflows/release.yml"* ]]
+}
+
+@test "a steering file is tier 1 — it is policy, and policy is the config's" {
+  # The affirmative half of moving AGENTS.md & co off the floor. Written first
+  # and kept beside its deny case below, because the risk of the move is not
+  # that these stop merging, it is that nothing says whether they should.
+  files "AGENTS.md" "docs/CLAUDE.md" "ai/SKILL.md" "GEMINI.md"
+  pr
+  run "$TIER" perch 7
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tier: 1"* ]]
+}
+
+@test "a steering file a policy denies is still refused — a setting, not a gap" {
+  # What the floor used to guarantee is now one line of config, and this is the
+  # case that says the line still reaches: a user who wants AGENTS.md held for
+  # the morning writes it in `tier1.deny` and gets exactly the old behaviour.
+  config '{scope: {orgs: ["hausfold"]},
+           tier1: {deny: ["(^|/)(AGENTS|CLAUDE|GEMINI|SKILL)\\.md$"]}}'
+  files "docs/factory.md" "AGENTS.md"
+  pr
+  run "$TIER" perch 7
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"touches AGENTS.md"* ]]
 }
 
 @test "a path that is neither docs/ nor markdown is refused" {
@@ -213,11 +233,11 @@ EOF
 @test "one bad path among good ones refuses the whole PR" {
   # The filter is over every file, not the first or the majority: a PR is tier
   # 1 only if there is nothing in it a person needed to see.
-  files "docs/factory.md" "README.md" "AGENTS.md"
+  files "docs/factory.md" "README.md" ".github/workflows/ci.yml"
   pr
   run "$TIER" perch 7
   [ "$status" -eq 3 ]
-  [[ "$output" == *"touches AGENTS.md"* ]]
+  [[ "$output" == *"touches .github/workflows/ci.yml"* ]]
 }
 
 # ── the structural checks, which are about the file LIST rather than its paths ─
@@ -382,7 +402,7 @@ EOF
 }
 
 @test "a bare repo name is qualified to the one org in scope, in the verdict too" {
-  files "AGENTS.md"
+  files ".github/workflows/ci.yml"
   pr
   run "$TIER" perch 7
   [ "$status" -eq 3 ]
@@ -479,10 +499,10 @@ EOF
 }
 
 @test "--json on a refusal carries the reason and a null tier" {
-  files "AGENTS.md"
+  files ".github/workflows/ci.yml"
   pr
   run "$TIER" --json perch 7
   [ "$status" -eq 3 ]
   [ "$(jq -r .tier <<<"$output")" = null ]
-  [ "$(jq -r .reason <<<"$output")" = "touches AGENTS.md" ]
+  [ "$(jq -r .reason <<<"$output")" = "touches .github/workflows/ci.yml" ]
 }

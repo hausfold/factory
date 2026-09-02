@@ -12,9 +12,9 @@
 # conflict-free, under the line cap.
 #
 # On top of whatever the policy denies sits a FLOOR no config can lower
-# (lib/common.sh, FACTORY_FLOOR_DENY): agent-steering files and CI/client
-# directories are never tier 1 however docs-shaped they look, because both are
-# policy rather than prose and a policy change always meets a person.
+# (lib/common.sh, FACTORY_FLOOR_DENY): CI and client directories, and the
+# content/ tree a site publishes from, are never tier 1 however docs-shaped
+# they look, because they are code and publishes rather than prose.
 #
 # Prints one verdict line; every refusal names its reason so the shift log
 # reads as an audit trail.
