@@ -13,7 +13,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ── presentation ──────────────────────────────────────────────────────────────
 # snug's bash half, read off the store path this tool's wrapper points at. The
-# standard is the workshop's `docs/cli-presentation.md`; what it buys here is
+# standard is snug's own README and AGENTS.md; what it buys here is
 # one palette resolved from nebelung instead of colours picked by eye, a report
 # budgeted against the window it lands in, and one gate that answers `NO_COLOR`,
 # a pipe and `TERM=dumb` the same way every other family CLI does.
@@ -46,8 +46,8 @@ type ui_paint_role >/dev/null 2>&1 && UI_READY=1
 
 # The marks are literals here, and that is deliberate: the ROLE comes from snug
 # and the GLYPH does not, so a machine with no ui.sh still reads ✓ from ✗. It is
-# the colour and the budget that degrade, never the meaning — `docs/
-# cli-presentation.md`, "the glyph is load-bearing and the colour is not".
+# the colour and the budget that degrade, never the meaning — snug's README,
+# "the glyph carries the meaning; the colour is the courtesy".
 FACTORY_MARK_OK='✓'
 FACTORY_MARK_WARN='⚠'
 FACTORY_MARK_BAD='✗'

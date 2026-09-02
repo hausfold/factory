@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# The presentation contract, from the workshop's docs/cli-presentation.md.
+# The presentation contract, from hausfold/snug's README and AGENTS.md.
 #
 # Three things are checked here and they fail for different reasons: the BAN
 # (factory never spells a colour itself), the DEGRADATION (a checkout with no

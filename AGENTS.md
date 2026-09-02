@@ -62,7 +62,7 @@ that comes from the user's config, always.
   ran the command for, so `factory shift >> nightly.log` has to come out whole —
   and escape-free, which it does because snug gates and measures each stream
   about its own far end. `fail`, `hint` and `die` are the fd-2 half. The
-  standard is the workshop's `docs/cli-presentation.md`; `test/presentation.bats`
+  standard is `hausfold/snug`'s README and AGENTS.md; `test/presentation.bats`
   is what holds factory to it, including a blanket ban on a literal escape
   anywhere in `bin/`, `libexec/` or `lib/`.
 - **One verb never parses another's human line.** `shift` asks `tier` and
