@@ -17,6 +17,7 @@ that comes from the user's config, always.
 |---|---|
 | `bin/factory` | the dispatcher, plus `config`, `doctor` and `skill`. Execs the libexec scripts; holds no policy of its own |
 | `lib/common.sh` | config load + validation, the deny **floor**, the BSD/GNU `stat`/`date` shims, `notify`. Sourced, never executed |
+| `lib/ui.sh` | how a line reaches the screen: `out_ok`/`out_warn`/`out_bad`/`out_info` on fd 1, `fail`/`hint`/`die` on fd 2, and snug's painter behind them. Separate from `common.sh` because `factory --help` must draw without `jq` |
 | `libexec/factory-lease` | the standing merge grant |
 | `libexec/factory-tier` | one PR's verdict. **The filter is the definition of tier 1** |
 | `libexec/factory-shift` | one pass. Deterministic: no judgement lives here |
@@ -48,9 +49,26 @@ that comes from the user's config, always.
 - **A number the README states is a number a test pins on both sides.** The
   budget dials live in `factory_defaults`; a pin that only greps the code is
   re-blessed by the same edit that breaks the doc.
-- **`bash`, `jq`, `gh` and nothing else.** No Go rewrite without a reason the
-  bash cannot meet; no other runtime dependency at all. It has to install with
-  a `git clone` and a symlink on a machine with no Nix.
+- **`bash`, `jq`, `gh` and nothing else *required*.** No Go rewrite without a
+  reason the bash cannot meet. It has to install with a `git clone` and a
+  symlink on a machine with no Nix — which is why snug is an input and not a
+  dependency: `lib/ui.sh` sources `$FACTORY_UI_SH` **if it is readable** and
+  degrades to plain marked text if it is not. The Nix wrapper sets that
+  variable at snug's store path; a cloned checkout has no wrapper, and prints
+  the same report unpainted. A change that makes any verb *need* snug has
+  broken the clone-and-symlink install.
+- **A report draws on fd 1; only an error draws on fd 2.** `doctor`'s checklist,
+  `tier`'s verdict, `lease status` and every line of a `shift` are what the user
+  ran the command for, so `factory shift >> nightly.log` has to come out whole —
+  and escape-free, which it does because snug gates and measures each stream
+  about its own far end. `fail`, `hint` and `die` are the fd-2 half. The
+  standard is the workshop's `docs/cli-presentation.md`; `test/presentation.bats`
+  is what holds factory to it, including a blanket ban on a literal escape
+  anywhere in `bin/`, `libexec/` or `lib/`.
+- **One verb never parses another's human line.** `shift` asks `tier` and
+  `lease` for `--json` and reads fields out of it. The human line carries a mark
+  in its gutter and is folded to the window; both are presentation, and both
+  have already broken a caller that treated the line as a contract.
 - **Portable between BSD and GNU.** The Mac holds the lease and the CI runner is
   Ubuntu. `stat` and `date` are probed once in `lib/common.sh` — never
   `bsd_form || gnu_form`, which appends the right answer to the wrong one.

@@ -18,7 +18,28 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "snug": "snug"
+      }
+    },
+    "snug": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788156577,
+        "narHash": "sha256-iPFewVsqNBOoZtfkZmKFWkE8qEq9GxUmil/MVsoI/YU=",
+        "owner": "hausfold",
+        "repo": "snug",
+        "rev": "a6d2210022324e9c6b2f95f9be44ff6cffc7f4fc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hausfold",
+        "repo": "snug",
+        "type": "github"
       }
     }
   },

@@ -31,7 +31,10 @@ setup() {
   mkdir -p "$TMP/root/libexec" "$TMP/root/lib" "$TMP/bin"
   cp "$BATS_TEST_DIRNAME/../libexec/factory-watchdog" "$TMP/root/libexec/"
   cp "$BATS_TEST_DIRNAME/../libexec/factory-lease" "$TMP/root/libexec/"
-  cp "$BATS_TEST_DIRNAME/../lib/common.sh" "$TMP/root/lib/"
+  # The whole lib/, not a named file: `common.sh` sources `ui.sh` beside it,
+  # and a copy list that names one of two is a harness that reds on a file the
+  # tool ships correctly.
+  cp "$BATS_TEST_DIRNAME"/../lib/*.sh "$TMP/root/lib/"
   cp "$BATS_TEST_DIRNAME/../VERSION" "$TMP/root/"
   WD="$TMP/root/libexec/factory-watchdog"
   LEASECMD="$TMP/root/libexec/factory-lease"

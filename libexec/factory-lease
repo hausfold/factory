@@ -45,12 +45,12 @@ EOF
 
 parse_duration() { # 30m / 12h / 2d → seconds
   case "$1" in
-  *[!0-9smhd]*) echo "factory: bad duration '$1' (use 30m, 12h, 2d)" >&2; exit 2 ;;
+  *[!0-9smhd]*) die "bad duration '$1' (use 30m, 12h, 2d)" ;;
   *m) echo $((${1%m} * 60)) ;;
   *h) echo $((${1%h} * 3600)) ;;
   *d) echo $((${1%d} * 86400)) ;;
   *s) echo "${1%s}" ;;
-  *)  echo "factory: bad duration '$1' (use 30m, 12h, 2d)" >&2; exit 2 ;;
+  *)  die "bad duration '$1' (use 30m, 12h, 2d)" ;;
   esac
 }
 
@@ -60,8 +60,13 @@ emit() { # emit <live> <tier> <expires> <granted> <human line>
       --argjson granted "$4" --arg line "$5" \
       '{live: $live, tier: $tier, expires: $expires, granted: $granted,
         secondsLeft: (if $live then ($expires - (now | floor)) else 0 end), line: $line}'
+  elif [ "$1" = true ]; then
+    out_ok "$5"
   else
-    echo "$5"
+    # Not a warning. No lease, an expired one and a revoked one are the ordinary
+    # answers to "may you merge?", and marking them ⚠ would make the quiet state
+    # of this machine look like something went wrong every time doctor ran.
+    out_info "$5"
   fi
 }
 
@@ -71,7 +76,7 @@ grant)
   [ -n "${2:-}" ] || usage
   secs=$(parse_duration "$2")
   tier="${3:-1}"
-  [ "$tier" = 1 ] || { echo "factory: only tier 1 exists (see docs/tiers.md)" >&2; exit 2; }
+  [ "$tier" = 1 ] || die "only tier 1 exists (see docs/tiers.md)"
   mkdir -p "$FACTORY_STATE_DIR"
   printf '%s\t%s\t%s\n' "$((now + secs))" "$tier" "$now" >"$LEASE"
   emit true "$tier" "$((now + secs))" "$now" "lease: tier $tier until $(at $((now + secs)))"

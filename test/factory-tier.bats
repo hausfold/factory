@@ -102,19 +102,26 @@ pr() {
 @test "a docs-only PR from a worktree branch is tier 1" {
   run "$TIER" perch 7
   [ "$status" -eq 0 ]
-  [[ "$output" == "tier: 1 "* ]]
+  # Not anchored at the start of the line: the verdict now sits in a three-cell
+  # gutter behind its mark. What the mark is, and that it is there at all, is
+  # test/presentation.bats's question.
+  [[ "$output" == *"tier: 1 "* ]]
 }
 
-@test "the tier-1 line ENDS in the head SHA, because factory-shift slices it" {
-  # `factory-shift` merges with `--match-head-commit "${verdict##*head=}"`,
-  # which takes everything after the last `head=` on the line. Anything
-  # appended after the SHA therefore becomes part of the SHA, the merge fails
-  # closed forever, and the shift silently stops merging — a two-file contract
-  # with nothing else checking it, so both sides are read here.
-  run "$TIER" perch 7
+@test "--json carries the head SHA, because factory-shift merges against it" {
+  # `factory-shift` merges with `--match-head-commit "$(jq -r .head)"`. A
+  # verdict that stopped carrying `.head` makes every merge fail closed forever
+  # and the shift silently stops merging — a two-file contract with nothing else
+  # checking it, so both sides are read here.
+  #
+  # It used to be read off the END of the human line with `${verdict##*head=}`,
+  # and that is exactly what a presentation change broke: the moment the verdict
+  # gained a mark in its gutter, a sibling strip in the same file stopped
+  # matching. A human line is drawn for a person; `--json` is the contract.
+  run "$TIER" --json perch 7
   [ "$status" -eq 0 ]
-  [[ "$output" == *"head=1a2b3c4d5e" ]]
-  grep -q 'verdict##\*head=' "$BATS_TEST_DIRNAME/../libexec/factory-shift"
+  [ "$(jq -r .head <<<"$output")" = "1a2b3c4d5e" ]
+  grep -q "jq -r '.head // \"\"'" "$BATS_TEST_DIRNAME/../libexec/factory-shift"
 }
 
 @test "a docs/ path that is not markdown is still tier 1" {
@@ -133,7 +140,7 @@ pr() {
   pr '.isDraft = true'
   run "$TIER" --paths-only perch 7
   [ "$status" -eq 0 ]
-  [[ "$output" == "tier: paths ok"* ]]
+  [[ "$output" == *"tier: paths ok"* ]]
 }
 
 # ── the deny list: one case per clause ────────────────────────────────────────
