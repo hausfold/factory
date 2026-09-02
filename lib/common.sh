@@ -31,23 +31,30 @@ have jq || die "jq is required (brew install jq)"
 
 # ── the floor ─────────────────────────────────────────────────────────────────
 # Deny patterns no config can switch off, applied on top of whatever the policy
-# denies. Two families, one reason each:
-#
-#   agent-steering files — a merged AGENTS.md/CLAUDE.md/SKILL.md is a change to
-#   how every agent on the machine behaves. It is docs-shaped and it is policy;
-#   a policy change always meets a person.
+# denies. What is left here is the paths that are not prose at all:
 #
 #   CI and client directories — a workflow file merged unattended is arbitrary
-#   code with the repo's own token, which is the whole ballgame.
+#   code with the repo's own token, which is the whole ballgame. `.claude/` and
+#   its siblings are the same argument, one directory per client.
 #
-# Case-insensitive because APFS is: a merged docs/claude.md IS what a tool
-# opening docs/CLAUDE.md reads. `content/` is here because a repo whose main
-# deploys a public site turns a docs merge into a publish, and a user-facing
-# publish is always gated — denied for every repo rather than scoped to the one
-# name where the path exists today, since a refusal only queues the PR for the
-# morning, which is where it would have been anyway.
+#   `content/` — a repo whose main deploys a public site turns a docs merge
+#   into a publish, and a user-facing publish is always gated. Denied for every
+#   repo rather than scoped to the one name where the path exists today, since
+#   a refusal only queues the PR for the morning, which is where it would have
+#   been anyway.
+#
+# Agent-steering files (AGENTS.md, CLAUDE.md, GEMINI.md, SKILL.md) were here
+# and are NOT any more: a machine whose worktree PRs are the owner's own edits
+# to its own instructions was queueing every one of them for a morning that
+# added nothing to reading them in the PR. They are ordinary policy now — a
+# `tier1.deny` entry holds them for anyone who wants them held, which is the
+# difference between a floor and a setting, and the config is the one file that
+# reads back what it will do.
+#
+# Case-insensitive because APFS is: a merged .GitHub/workflows/x.yml IS what
+# Actions runs, and a clause that only knows one spelling has already stopped
+# matching.
 FACTORY_FLOOR_DENY='[
-  "(^|/)(AGENTS|CLAUDE|GEMINI|SKILL)\\.md$",
   "^\\.(github|claude|agents|codex|cursor|gemini|opencode)/",
   "^content/"
 ]'
