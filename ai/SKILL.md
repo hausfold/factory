@@ -37,8 +37,11 @@ call it — usually a person, or an agent driving the `nightshift` loop.
 | is the foreman alive | `factory watchdog once` |
 | last night's report | `cat ~/.cache/factory/shift-$(date +%Y%m%d).log` |
 
-Every read verb takes `--json`; `factory shift --json` emits one JSON object per
-event.
+Every read verb takes `--json` — `doctor` included, where it returns one
+document with a `checks[]` array, a `ready` boolean and the `lease`/`watchdog`
+objects nested whole. `factory shift --json` emits one JSON object per event. A
+flag a verb does not know is refused on stderr, so prose back from a `--json`
+run always means the run failed, never that the verb had no JSON to give.
 
 ## When to reach for this
 
