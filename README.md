@@ -398,10 +398,16 @@ indistinguishable from a healthy one until the morning you needed the card.
 `notify.command` is not in the starter config either. The example is the shape
 you edit; `factory config print`'s notify row is what is in force.
 
+`factory doctor` asks the other half of the question: not what is configured
+but whether it can reach anything. A `command` that PATH cannot find blocks,
+because you typed it and it cannot work. `auto` with no trill installed, and
+`off`, are notes rather than blocks: neither is a fault, and both are worth
+saying out loud on a report about whether this machine can run a night.
+
 ## Development
 
 ```sh
-bats test/                                    # 129 cases
+bats test/                                    # 133 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

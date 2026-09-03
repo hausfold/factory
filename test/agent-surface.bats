@@ -64,6 +64,14 @@ case "$*" in
 esac
 EOF
   chmod +x "$TMP/bin/gh"
+  # A trill on PATH, so the notify check resolves the same here as on a runner.
+  # It is never RUN by `doctor`, which only asks whether it exists — but the
+  # answer to that question is the difference between an ok and a note, and a
+  # note is the difference between doctor exiting 1 and 2. A suite whose verdict
+  # depends on what the developer happens to have installed is a suite that
+  # reds on a plane.
+  printf '#!/usr/bin/env bash\n' >"$TMP/bin/trill"
+  chmod +x "$TMP/bin/trill"
 
   # snug's bash half, probed the way test/presentation.bats probes it. Only the
   # escape case needs it; everything else here is about the document, which no
@@ -133,6 +141,48 @@ EOF
   [[ "$output" == *"$line"* ]]
 }
 
+# ── whether anything will reach you ───────────────────────────────────────────
+# `doctor` asks whether this machine can run a shift, and until these cases it
+# never asked the half that matters at 3am: a shift that merges correctly and
+# cards nowhere reports its red CI to nobody. Three arms, three severities.
+
+@test "doctor names a notify.command that PATH cannot find, and blocks on it" {
+  printf '{"scope":{"orgs":["hausfold"]},"notify":{"mode":"command","command":["no-such-notifier"]}}\n' \
+    >"$FACTORY_CONFIG"
+  run "$FACTORY" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no-such-notifier, which is not on PATH"* ]]
+}
+
+@test "a notify.command that exists is green, and names what it will run" {
+  printf '#!/usr/bin/env bash\n' >"$TMP/bin/my-notifier"
+  chmod +x "$TMP/bin/my-notifier"
+  printf '{"scope":{"orgs":["hausfold"]},"notify":{"mode":"command","command":["my-notifier","--to","me"]}}\n' \
+    >"$FACTORY_CONFIG"
+  run "$FACTORY" doctor
+  [[ "$output" == *"runs my-notifier"* ]]
+  [[ "$output" != *"not on PATH"* ]]
+}
+
+@test "notify.mode off is a note, not a block — it is a decision, not a fault" {
+  printf '{"scope":{"orgs":["hausfold"]},"notify":{"mode":"off"}}\n' >"$FACTORY_CONFIG"
+  run "$FACTORY" doctor
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"card nowhere"* ]]
+}
+
+@test "auto with no trill is a note too, because that is a stranger's machine" {
+  # PATH is PREPENDED, so deleting the stub falls through to whatever trill the
+  # developer has installed. This case is about a machine with none, which is
+  # the runner and not their Mac — skipped there rather than faked, the same
+  # way presentation.bats skips what needs snug.
+  rm -f "$TMP/bin/trill"
+  command -v trill >/dev/null 2>&1 && skip "a real trill is on PATH; this case is about a machine without one"
+  run "$FACTORY" doctor
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"trill is not installed"* ]]
+}
+
 @test "a quiet machine is ready, and says so in both exit code and field" {
   run "$FACTORY" doctor --json
   # No org missing, gh answering, state dir writable: nothing blocks, and the
@@ -150,7 +200,7 @@ EOF
   # breaking change and belongs here rather than in a caller's surprise.
   local ids
   ids=$(jq -r '[.checks[].check] | join(" ")' <<<"$output")
-  [[ "$ids" == "jq gh config-file scope digest budget after-merge state-dir" ]]
+  [[ "$ids" == "jq gh config-file scope digest budget after-merge notify state-dir" ]]
   [ "$(jq -r '[.checks[] | select(.section == "")] | length' <<<"$output")" = 0 ]
   [ "$(jq -r '[.checks[] | select(.state | test("^(ok|warn|bad)$") | not)] | length' <<<"$output")" = 0 ]
 }
