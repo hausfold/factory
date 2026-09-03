@@ -76,7 +76,7 @@ grant)
   [ -n "${2:-}" ] || usage
   secs=$(parse_duration "$2")
   tier="${3:-1}"
-  [ "$tier" = 1 ] || die "only tier 1 exists (see docs/tiers.md)"
+  [ "$tier" = 1 ] || die "only tier 1 exists — widen tier1.allow instead; a wider grant would be a new tier value here"
   mkdir -p "$FACTORY_STATE_DIR"
   printf '%s\t%s\t%s\n' "$((now + secs))" "$tier" "$now" >"$LEASE"
   emit true "$tier" "$((now + secs))" "$now" "lease: tier $tier until $(at $((now + secs)))"
