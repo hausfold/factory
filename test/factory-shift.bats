@@ -489,6 +489,71 @@ EOF
   grep -q "pass aborted" "$TRILL_CALLS"
 }
 
+# ── notify.mode: command, the delivery path `auto` never exercises ────────────
+# Every case above runs under the default `auto`, which finds the stubbed trill.
+# `command` is a second path with its own argv contract, and it had no case at
+# all: a mode validation names, `config print` prints, and nothing ever ran.
+
+@test "notify.mode command runs the argv, with kind and title appended" {
+  cat >"$TMP/bin/recorder" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$TMP/notify-calls"
+EOF
+  chmod +x "$TMP/bin/recorder"
+  cat >"$TMP/config.json" <<EOF
+{
+  "scope": { "orgs": ["hausfold"] },
+  "budget": { "feed": "$TMP/usage.tsv" },
+  "notify": { "mode": "command", "command": ["recorder", "--to", "me"] }
+}
+EOF
+  stub_gh fail green none
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  # The user's own argv first, the event appended behind it in that order.
+  grep -q -- "--to me fault factory: pass aborted" "$TMP/notify-calls"
+  # And trill was not also called: the modes are exclusive, not additive.
+  [ ! -f "$TRILL_CALLS" ]
+}
+
+@test "notify.mode command with nothing to run is a usage error, not a quiet night" {
+  # The shape this arm exists for: `command` with an empty argv used to return
+  # 0 from `notify` without sending anything, and a shift that cards nothing
+  # looks exactly like a shift with nothing to card until the morning you
+  # needed one.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "notify": { "mode": "command" } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"notify.mode is command with an empty notify.command"* ]]
+}
+
+@test "a notify.command written as a string is refused rather than iterated" {
+  # `cfg '.notify.command[]'` cannot iterate a string: jq writes an error to
+  # stderr, the argv comes back empty, and `notify` returns 0. Same silence as
+  # above, arrived at from the likelier typo.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] },
+  "notify": { "mode": "command", "command": "notify-send" } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"notify.command must be an array of argv words"* ]]
+}
+
+@test "an empty notify.source is a usage error, because a rule matches on it" {
+  # `trill send --source ""` is the one value that cannot be routed: a rules
+  # file matches on that string, so an empty one silences this tool by making
+  # it unnameable rather than by anybody deciding to.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "notify": { "source": "" } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"notify.source must be a non-empty string"* ]]
+}
+
 # ── the log is the handover, so it has to hold what the terminal showed ───────
 
 @test "every line the pass printed is also in the day's log" {

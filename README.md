@@ -288,10 +288,19 @@ lease goes on standing for hours with nobody exercising it.
 
 The heartbeat is the shift log's mtime, read as the **later** of that and the
 lease's own grant stamp. Two thresholds, because a blip and a death want
-different answers: at **45 minutes** quiet the watchdog writes `foreman-stalled`
-and cards it once, and the lease stands; at **90** it writes `foreman-gone` and
-**revokes the lease**, so the morning finds the ordinary human-in-the-loop
-workflow rather than a standing grant nobody is exercising.
+different answers: at **45 minutes** quiet (`watchdog.stale`, 2700 seconds) the
+watchdog writes `foreman-stalled` and cards it once, and the lease stands; at
+**90** (`watchdog.dead`, 5400) it writes `foreman-gone` and **revokes the
+lease**, so the morning finds the ordinary human-in-the-loop workflow rather
+than a standing grant nobody is exercising.
+
+The poll runs every `watchdog.interval` (300 seconds), and `dead` has to be
+greater than `stale`, which validation enforces at startup. The other way round
+is a watchdog that revokes a lease before it has warned anybody, and a policy
+saying so must never reach the loop and find out there. Those three are a
+`watchdog` block in the policy file, absent from the starter config for the
+reason `scope`'s two keys are: `factory config print`'s watchdog row is what is
+in force.
 
 Both thresholds count time the poller was **awake** for. A machine that
 suspended has a stale log through nobody's fault — the watchdog was not running
@@ -356,10 +365,49 @@ no `FACTORY_UI_SH` and prints the same reports with the same marks, unpainted.
 `NO_COLOR`, a pipe and `TERM=dumb` each turn the colour off; `CLICOLOR_FORCE=1`
 turns it on for a pipe, and `dumb` beats even that.
 
+### The card, for the report nobody is reading
+
+A shift runs while nobody is watching, so six moments are drawn as a
+notification as well as a log line: a pass that **aborted**, a **red default
+branch** (with the run's URL on it), an **after-merge hook that failed**, the
+**merge tally** at the end of a pass that merged something, and the watchdog's
+**stalled** and **gone**. Nothing else cards. One unseeable repo does not,
+because whether that is worth waking somebody for is the foreman's judgement
+rather than a script's.
+
+`notify.mode` decides how one is sent:
+
+| | |
+|---|---|
+| `auto` | the default: [trill](https://github.com/hausfold/trill) when it is installed, nothing at all when it is not. The family's machines card and a stranger's stays quiet, neither having configured anything |
+| `command` | the argv in `notify.command`, with the event appended as `<kind> <title> [url]`. No flag shape is assumed, so `notify-send`, a shell function and a webhook `curl` all fit. `kind` is `fault` or `done` |
+| `off` | nothing is sent |
+
+`notify.source` (`factory`) is the string a notification rule matches on. Under
+trill that rule lives in `~/.config/trill/rules.json`, and the key is the
+difference between silencing this tool and silencing the machine. That is the
+whole reason it exists, so an empty one is a usage error.
+
+**A card that could not be drawn never takes down the pass it was reporting
+on.** A `command` that exits non-zero and a trill that is not installed both
+cost the pass nothing and say nothing. Which is why `mode: "command"` with an
+empty `notify.command` is refused at startup instead of running as a quiet
+no-op: silence is what a working night looks like too, so that config is
+indistinguishable from a healthy one until the morning you needed the card.
+
+`notify.command` is not in the starter config either. The example is the shape
+you edit; `factory config print`'s notify row is what is in force.
+
+`factory doctor` asks the other half of the question: not what is configured
+but whether it can reach anything. A `command` that PATH cannot find blocks,
+because you typed it and it cannot work. `auto` with no trill installed, and
+`off`, are notes rather than blocks: neither is a fault, and both are worth
+saying out loud on a report about whether this machine can run a night.
+
 ## Development
 
 ```sh
-bats test/                                    # 120 cases
+bats test/                                    # 133 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

@@ -192,7 +192,7 @@ cmd_config() {
             "deny\t\((.tier1.deny + $floor) | join("  "))",
             "budget\t\(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
             "after\t\(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
-            "notify\t\(.notify.mode), source \(.notify.source)",
+            "notify\t\(.notify.mode), source \(.notify.source), command \(if (.notify.command | length) == 0 then "-" else (.notify.command | join(" ")) end)",
             "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
       )"
       while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done <<<"$rows"
@@ -314,6 +314,28 @@ cmd_doctor() {
   elif [ -n "$wd" ] && [ ! -d "$wd" ]; then bad after-merge "afterMerge.workdir does not exist: $wd"
   elif [ -n "$wd" ]; then ok after-merge "$n_cmd command(s) in $wd"
   else ok after-merge "$n_cmd command(s) in the current directory"; fi
+
+  # Whether anything will actually REACH you is a readiness question, the same
+  # shape as the budget feed above: a shift that merges correctly and cards
+  # nowhere is a shift whose red CI and dead foreman go unread until morning.
+  # Nothing here blocks a merge, but a `command` the user typed and PATH cannot
+  # find is a configured thing that cannot work — `afterMerge.workdir`'s
+  # footing, so `afterMerge.workdir`'s severity.
+  sec notify
+  local nmode nsource
+  nmode=$(cfg .notify.mode); nsource=$(cfg .notify.source)
+  case "$nmode" in
+  off) note notify "notify.mode is off — a red CI and a dead foreman card nowhere" ;;
+  command)
+    local ncmd; ncmd=$(cfg '.notify.command[0]')
+    if have "$ncmd"; then ok notify "runs $ncmd, source $nsource"
+    else bad notify "notify.command names $ncmd, which is not on PATH — every card would be swallowed"; fi
+    ;;
+  *)
+    if have trill; then ok notify "trill, source $nsource"
+    else note notify "notify.mode is auto and trill is not installed — nothing cards on this machine"; fi
+    ;;
+  esac
 
   sec state
   if mkdir -p "$FACTORY_STATE_DIR" 2>/dev/null && [ -w "$FACTORY_STATE_DIR" ]; then
