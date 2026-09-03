@@ -51,11 +51,17 @@ Plus the surface around them: `factory config print`, `factory doctor`,
 
 | | |
 |---|---|
-| **0** | ok · tier 1 · foreman healthy |
-| **1** | nothing (no live lease) · a pass that aborted having sensed nothing |
-| **2** | usage, or a config that cannot be used |
+| **0** | ok · tier 1 · foreman healthy · `doctor` ready with nothing to note |
+| **1** | nothing (no live lease) · a pass that aborted having sensed nothing · `doctor` ready **with notes** |
+| **2** | usage, or a config that cannot be used · `doctor` blocking |
 | **3** | refused (not tier 1) · foreman stalled |
 | **4** | a live lease with no poller watching it |
+
+**`doctor` is the one verb whose 1 is not a refusal**, and it is the row to
+read twice. A ready machine with something worth mentioning exits 1, and there
+is usually something: no `budget.feed`, no `afterMerge` commands, no trill.
+Branch on `.blocking` or `.ready` in the JSON rather than on the code if you
+want the yes/no.
 
 Every read verb takes `--json`, `doctor` included — the checklist comes back as
 one document whose `checks[]` carry a stable `check` id, so a report form or an
@@ -371,9 +377,13 @@ A shift runs while nobody is watching, so six moments are drawn as a
 notification as well as a log line: a pass that **aborted**, a **red default
 branch** (with the run's URL on it), an **after-merge hook that failed**, the
 **merge tally** at the end of a pass that merged something, and the watchdog's
-**stalled** and **gone**. Nothing else cards. One unseeable repo does not,
-because whether that is worth waking somebody for is the foreman's judgement
-rather than a script's.
+**stalled** and **gone**. Nothing else cards, and the two that most look like
+they should are deliberate. One unseeable repo does not, because whether that
+is worth waking somebody for is the foreman's judgement rather than a script's.
+`merge-failed` does not either: its commonest cause is the `--match-head-commit`
+pin working exactly as designed, which is a line to read in the morning and not
+a reason to wake up. Its rarer cause, an expired token, is a shift that has been
+over for hours, and the watchdog is what cards that.
 
 `notify.mode` decides how one is sent:
 
@@ -407,7 +417,7 @@ saying out loud on a report about whether this machine can run a night.
 ## Development
 
 ```sh
-bats test/                                    # 133 cases
+bats test/                                    # 135 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

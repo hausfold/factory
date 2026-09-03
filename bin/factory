@@ -328,7 +328,10 @@ cmd_doctor() {
   off) note notify "notify.mode is off — a red CI and a dead foreman card nowhere" ;;
   command)
     local ncmd; ncmd=$(cfg '.notify.command[0]')
-    if have "$ncmd"; then ok notify "runs $ncmd, source $nsource"
+    # No source on this arm: `--source` is the trill call's flag, and a command
+    # is handed `<kind> <title> [url]` and nothing else. Naming it here would
+    # promise a routing key the mode does not send.
+    if have "$ncmd"; then ok notify "runs $ncmd"
     else bad notify "notify.command names $ncmd, which is not on PATH — every card would be swallowed"; fi
     ;;
   *)

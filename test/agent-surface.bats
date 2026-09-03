@@ -67,9 +67,10 @@ EOF
   # A trill on PATH, so the notify check resolves the same here as on a runner.
   # It is never RUN by `doctor`, which only asks whether it exists — but the
   # answer to that question is the difference between an ok and a note, and a
-  # note is the difference between doctor exiting 1 and 2. A suite whose verdict
-  # depends on what the developer happens to have installed is a suite that
-  # reds on a plane.
+  # note is the difference between doctor exiting 0 and 1 — never 2, which
+  # wants a BLOCKING check and this arm never is. A suite whose verdict depends
+  # on what the developer happens to have installed is a suite that reds on a
+  # plane.
   printf '#!/usr/bin/env bash\n' >"$TMP/bin/trill"
   chmod +x "$TMP/bin/trill"
 
@@ -141,6 +142,16 @@ EOF
   [[ "$output" == *"$line"* ]]
 }
 
+# The Development block tells a reader how big this suite is, and that number
+# has now gone stale twice — once at 120 against 133, once in the CI comment
+# beside it. It is a claim about a thing this file can count, so it counts it.
+@test "the case count the README states is the case count there is" {
+  local n
+  n=$(grep -h '^@test' "$BATS_TEST_DIRNAME"/*.bats | wc -l | tr -d ' ')
+  grep -qF "bats test/                                    # $n cases" \
+    "$BATS_TEST_DIRNAME/../README.md"
+}
+
 # ── whether anything will reach you ───────────────────────────────────────────
 # `doctor` asks whether this machine can run a shift, and until these cases it
 # never asked the half that matters at 3am: a shift that merges correctly and
@@ -186,8 +197,11 @@ EOF
 @test "a quiet machine is ready, and says so in both exit code and field" {
   run "$FACTORY" doctor --json
   # No org missing, gh answering, state dir writable: nothing blocks, and the
-  # two notes are the budget feed and the empty afterMerge list.
+  # two notes are the budget feed and the empty afterMerge list. Counted rather
+  # than described: without the trill stub `setup` installs there would be a
+  # third, and a comment is not what keeps that stub load-bearing.
   [ "$status" -eq 1 ]
+  [ "$(jq -r .notes <<<"$output")" = 2 ]
   [ "$(jq -r .ready <<<"$output")" = true ]
   [ "$(jq -r .blocking <<<"$output")" = 0 ]
   [ "$(jq -r .exit <<<"$output")" = 1 ]
@@ -218,7 +232,10 @@ EOF
 }
 
 @test "doctor --json nests the sub-verbs whole rather than scraping their lines" {
-  run "$FACTORY" doctor --json
+  # --separate-stderr, like the two refusal cases above: bare `run` folds fd 2
+  # into $output, so one stray narration line would fail the jq below as a
+  # parse error at some column rather than as the two-streams break it is.
+  run --separate-stderr "$FACTORY" doctor --json
   # `lease status --json` and `watchdog once --json` own these shapes; doctor
   # asks for them in JSON and embeds them. One verb never parses another's
   # human line.

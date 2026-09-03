@@ -16,16 +16,21 @@ and the shift log is your handover. Read `factory skill` once first.
 
 ## Start
 
-1. `factory lease grant <duration>` — the duration from the invocation; no
+1. `factory doctor` — before any authority is granted. It is the only step
+   that asks whether this machine can *reach* you: a `notify.command` PATH
+   cannot find, or no trill on a machine set to `auto`, is a night that merges
+   correctly and cards its red CI nowhere. `.blocking > 0` stops here; notes
+   are worth one line in your start message.
+2. `factory lease grant <duration>` — the duration from the invocation; no
    duration given means **1h**. Tell the user in one line what authority you now
    hold and until when.
-2. `factory watchdog once` — confirm the poller `grant` just started is watching
+3. `factory watchdog once` — confirm the poller `grant` just started is watching
    you. It is what turns your own death into something the user finds in the
    morning instead of a lease that stood all night with nobody exercising it.
    Exit **0** is what you want. **4** is `NO POLLER` — a live lease nothing is
    watching; say so in your start line. **1** means the grant did not take and
    there is no shift to run.
-3. `factory shift --dry-run` — one sensing pass so your first real pass holds no
+4. `factory shift --dry-run` — one sensing pass so your first real pass holds no
    surprises. If it shows `would-merge` rows the user can still see, name them.
 
 ## The loop
