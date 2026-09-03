@@ -100,15 +100,22 @@ floor below them that no config can lower — so what it prints is what
 ```
 
 **Two `scope` keys are not in that example and still decide what a pass can
-see.** `archived` defaults to `false`, so the org walk is listed with
-`--no-archived`: an archived repo is never a candidate, and an `exclude` entry
-naming one can never match. Un-archiving puts that repo in scope the same night,
-with no config change to notice. `limit` defaults to `100` and is the page size
-the org listing asks for, so an org past that number is walked short and nothing
-says so. `scope.repos` is the exception to the first: an explicit `owner/name`
-is walked whether or not it is archived, because you named it. Both keys are on
-`factory config print`'s scope row, beside the count of exclusions your file
-*writes* — which is not the same number as the count that can match.
+see.** `archived` (`false`) lists each org with `--no-archived`, so an archived
+repo is never a candidate and an `exclude` entry naming one can never match
+there. Un-archiving puts that repo in scope the same night, with no config
+change to notice. `limit` (100) is the cap on how many repos an org listing
+returns — `gh`'s own default is 30, and paging happens under it — so an org with
+more than that is walked short. A listing that comes back sitting exactly on the
+cap says so as `scope-truncated`, because that count is the only signal there
+is: a truncated org and one that happens to have exactly that many repos are the
+same number.
+
+`scope.repos` is the exception to both: an explicit `owner/name` is walked
+whether or not it is archived and whatever the cap is, because you named it —
+and an `exclude` entry *can* turn one of those away, since exclusions are
+matched over the combined list. Both keys are on `factory config print`'s scope
+row, beside the count of exclusions your file *writes*, which is not the same
+number as the count that can match.
 
 **It is machine-local because it is authority.** A copy inside a watched repo
 would be a file a pull request could edit to widen the filter that judges it —

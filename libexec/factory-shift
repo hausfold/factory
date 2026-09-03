@@ -249,6 +249,18 @@ for org in $orgs; do
     abort "$org's repos could not be listed: $(oneline "$(cat "$ERRF")")"
   fi
   [ -n "$rows" ] || abort "$org listed zero repos — refusing to call that a quiet night"
+  # `--limit` is a cap on what comes back, not a page size gh keeps asking past,
+  # so an org with more repos than it returns exactly that many and says nothing
+  # — and a repo beyond the cap is never looked at while the pass still prints a
+  # quiet night. The count can be equalled and never exceeded, which is the only
+  # signal there is: an org truncated by the cap and one that happens to hold
+  # exactly that many are the same number. So this warns where its neighbours
+  # abort. Named, though, because the rule the block is built on is that a step
+  # which could fail to SEE degrades to a stated line rather than to silence.
+  n_listed=$(printf '%s\n' "$rows" | awk 'NF' | wc -l | tr -d ' ')
+  [ "$n_listed" -lt "$limit" ] ||
+    say "$(J --arg o "$org" --argjson n "$n_listed" '{event:"scope-truncated", org:$o, listed:$n}')" \
+      "$org listed $n_listed repos, the whole of scope.limit — anything past it was not walked" warn
   listed="$listed$rows"$'\n'
 done
 for r in $explicit; do

@@ -127,6 +127,8 @@ factory_validate() {
       (if (.tier1.requireGreen | IN("if-present","always","never") | not) then "tier1.requireGreen must be if-present, always or never" else empty end),
       (if (.tier1.mergeMethod | IN("squash","merge","rebase") | not) then "tier1.mergeMethod must be squash, merge or rebase" else empty end),
       (if (.tier1.base | type) != "string" or (.tier1.base | length) == 0 then "tier1.base must be a branch name" else empty end),
+      (if (.scope.archived | type) != "boolean" then "scope.archived must be true or false" else empty end),
+      (if (.scope.limit | type) != "number" or .scope.limit < 1 then "scope.limit must be a positive number" else empty end),
       (if (.budget.mode | IN("metered","unmetered") | not) then "budget.mode must be metered or unmetered" else empty end),
       (if (.notify.mode | IN("auto","command","off") | not) then "notify.mode must be auto, command or off" else empty end),
       ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number")) | if length > 0 then "budget thresholds must be numbers" else empty end),
