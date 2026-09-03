@@ -123,7 +123,7 @@ factory_validate() {
   err="$(printf '%s' "$FACTORY_CFG" | jq -r '
     [ (if (.tier1.allow | length) == 0 then "tier1.allow is empty — no PR could ever be tier 1" else empty end),
       (if (.tier1.authors | length) == 0 then "tier1.authors is empty — write [\"*\"] if you really mean anyone" else empty end),
-      (if (.tier1.maxLines | type) != "number" or .tier1.maxLines < 1 then "tier1.maxLines must be a positive number" else empty end),
+      (if (.tier1.maxLines | type) != "number" or .tier1.maxLines != (.tier1.maxLines | floor) or .tier1.maxLines < 1 then "tier1.maxLines must be a whole number of lines, 1 or more" else empty end),
       (if (.tier1.requireGreen | IN("if-present","always","never") | not) then "tier1.requireGreen must be if-present, always or never" else empty end),
       (if (.tier1.mergeMethod | IN("squash","merge","rebase") | not) then "tier1.mergeMethod must be squash, merge or rebase" else empty end),
       (if (.tier1.base | type) != "string" or (.tier1.base | length) == 0 then "tier1.base must be a branch name" else empty end),
@@ -135,8 +135,30 @@ factory_validate() {
       (if .notify.mode == "command" and (.notify.command | type) == "array" and (.notify.command | length) == 0 then "notify.mode is command with an empty notify.command — nothing would ever be sent; write \"off\" if that is what you mean" else empty end),
       (if (.notify.command | type) == "array" and (.notify.command | length) > 0 and ((.notify.command[0] | type) != "string" or (.notify.command[0] | length) == 0) then "notify.command starts with an empty word — there is no program there to run" else empty end),
       (if (.notify.source | type) != "string" or (.notify.source | length) == 0 then "notify.source must be a non-empty string — it is what a notification rule matches on" else empty end),
-      ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number")) | if length > 0 then "budget thresholds must be numbers" else empty end),
-      ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . < 1)) | if length > 0 then "watchdog thresholds must be positive numbers" else empty end),
+      # All four are percentage points of a 0-100 window, and all four are read
+      # by SHELL integer arithmetic, so "is it a number" is not the question.
+      # A fraction passes `type == "number"` and then breaks two ways one layer
+      # down, neither of them loudly. `factory-shift` runs under `set -uo
+      # pipefail` and deliberately not `-e`, so `$((70.5 * left / 604800))`
+      # writes an arithmetic error to a stderr nobody reads, skips the rest of
+      # the block and leaves the pass to end on `pass done: 0 merged` with no
+      # `budget:` line in it at all — the shape of a quiet night, which is the
+      # one degradation this block may not have. `[ "$p5" -ge "80.5" ]` is
+      # quieter still: test(1) complains and returns non-zero, the `if` reads
+      # that as false, and the 5-hour condition that OUTRANKS the weekly half
+      # never fires again. Out of range is the second of those without even the
+      # stderr: `window5hMax` above 100 cannot fire against a percentage the
+      # feed check has already bounded at 100, and a negative `reserve` buys
+      # headroom the account does not have.
+      ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number" or . != floor or . < 0 or . > 100)) | if length > 0 then "budget thresholds must be whole numbers of percentage points, 0-100" else empty end),
+      # Whole for the reason the budget dials are, and this is where it costs
+      # most: a
+      # fractional `dead` makes `[ "$quiet" -ge "$DEAD" ]` read false at every
+      # poll, so the foreman death this entire layer exists to notice is never
+      # noticed and the lease stands until morning. That one fails OPEN, which
+      # `tier1.maxLines` above does not — `[ "$churn" -le "$max" ]` refuses
+      # every PR instead, with the nonsense cap printed in the reason.
+      ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . != floor or . < 1)) | if length > 0 then "watchdog thresholds must be whole numbers of seconds, 1 or more" else empty end),
       (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end)
     ] | join("; ")')"
   [ -z "$err" ] || die "$err  (in $FACTORY_CONFIG_PATH)"

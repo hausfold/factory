@@ -201,19 +201,73 @@ stub_usage() { # <5h %> <week %> <seconds of week left> [seconds of 5h left]
 # matters most here is the plain affirmative, and it is written first — the
 # refusals below it are only worth pinning once something can get through.
 
-@test "the two dials and the ceiling are still the ones the docs state" {
-  # The README's budget section quotes these three numbers, and the verdict is
+@test "all four budget dials are still the ones the docs state" {
+  # The README's budget section quotes these four numbers, and the verdict is
   # unreadable without them. A tuned dial is a fine change; a tuned dial the
   # doc still states the old value for is the drift this pins.
   #
   # Both SIDES are read, and that is the whole point: a pin that only greps the
   # defaults is re-blessed by the same edit that breaks the doc, which is a
   # check whose remedy is to update the check.
+  #
+  # `window5hMax` is the fourth because it was for a long time the one dial the
+  # README named no key for at all: the 5-hour bound was narrated as a fixed
+  # 80%, which is the shape a retune leaves stale with nothing red.
   lib="$BATS_TEST_DIRNAME/../lib/common.sh"
   doc="$BATS_TEST_DIRNAME/../README.md"
   grep -q '"ceiling": 95' "$lib" && grep -q 'ceiling` (95' "$doc"
   grep -q '"reserve": 70' "$lib" && grep -q 'reserve` (70)' "$doc"
   grep -q '"fixer": 5' "$lib" && grep -q 'fixer` (5)' "$doc"
+  grep -q '"window5hMax": 80' "$lib" && grep -qF 'window5hMax` (80)' "$doc"
+  # And the claim BESIDE them, which is about a third file: the four dials are
+  # absent from the starter config on purpose, the same way `scope`'s two keys
+  # and `notify.command` are. Adding one to the example would otherwise make
+  # that sentence wrong with nothing red.
+  ex="$BATS_TEST_DIRNAME/../share/config.example.json"
+  for d in ceiling reserve fixer window5hMax; do
+    ! grep -q "\"$d\"" "$ex"
+  done
+}
+
+@test "a fractional window5hMax is refused, not a 5-hour gate that stops firing" {
+  # `[ "$p5" -ge "80.5" ]` is not an error the pass dies on — test(1) complains
+  # to stderr and returns non-zero, which the `if` reads as false. So the one
+  # condition that OUTRANKS the weekly half silently retires, and the shift goes
+  # on spawning lanes at 99% of the rolling window. `type == "number"` was true
+  # of it, which is why the check had to grow past that.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "budget": { "window5hMax": 80.5 } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"budget thresholds must be whole numbers of percentage points"* ]]
+}
+
+@test "a fractional reserve is refused, not a budget line that vanishes" {
+  # The other half of the same hole, and NOT a crash: this script runs under
+  # `set -uo pipefail` and deliberately not `-e`, so `$((70.5 * left /
+  # 604800))` writes an arithmetic error to stderr, skips the rest of the block
+  # and lets the pass end on `pass done: 0 merged` with no `budget:` line in it
+  # — which is the shape of a healthy quiet night. A nonsense policy stops at
+  # validation, where the message names the key.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "budget": { "reserve": 70.5 } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"budget thresholds must be whole numbers of percentage points"* ]]
+}
+
+@test "a budget dial outside the 0-100 window is refused too" {
+  # Out of range is the same silence as a fraction, without the stderr: a
+  # `window5hMax` above 100 cannot fire against a percentage the feed check has
+  # already bounded at 100, so the gate is open for good.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "budget": { "window5hMax": 101 } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"budget thresholds must be whole numbers of percentage points"* ]]
 }
 
 # ── the fifth way to be blind: an org listing cut off at the cap ──────────────

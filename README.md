@@ -252,13 +252,24 @@ budget: 5h 13% · week 16% · reserve 58 pts · headroom 21 pts · fixer: yes
 ```
 
 Two conditions, both protecting the human's hours. First, the **5-hour window
-under 80%** — a factory that saturates the rolling window at 4 a.m. is
-rate-limiting the person who sits down at 9, and that outranks the weekly half.
-Second, **enough weekly headroom left for one lane**: `reserve` (70) points of
-the weekly window are the human's, draining evenly as the week runs off, so the
-reserve right now is `70 × (fraction of the week remaining)`. What sits between
-that and the `ceiling` (95; the top five points are nobody's) is the factory's
-to spend, and a lane needs `fixer` (5) points of it.
+under `window5hMax` (80)** — a factory that saturates the rolling window at
+4 a.m. is rate-limiting the person who sits down at 9, and that outranks the
+weekly half. Second, **enough weekly headroom left for one lane**:
+`reserve` (70) points of the weekly window are the human's, draining evenly as
+the week runs off, so the reserve right now is
+`70 × (fraction of the week remaining)`. What sits between that and the
+`ceiling` (95; the top five points are nobody's) is the factory's to spend, and
+a lane needs `fixer` (5) points of it.
+
+Those four are the whole dial set, they are absent from the starter config for
+the reason `scope`'s two keys are, and each is a **whole** number of percentage
+points between 0 and 100. The wholeness is checked at startup rather than left
+to taste, because the arithmetic behind the verdict is shell integer arithmetic
+and a fraction there does not raise its voice: `70.5` fails the arithmetic and
+takes the entire `budget:` line out of the log, leaving a pass that ends clean
+on the output a quiet night makes, and `80.5` is a comparison that reads false —
+retiring the condition that outranks the other one. Neither is a crash, which is
+why neither could be left to be discovered at 3 a.m.
 
 The question is **forward-looking**, and that is the load-bearing part. "Is the
 week spent no faster than the clock so far" is a question nobody has, and it
@@ -307,6 +318,13 @@ saying so must never reach the loop and find out there. Those three are a
 `watchdog` block in the policy file, absent from the starter config for the
 reason `scope`'s two keys are: `factory config print`'s watchdog row is what is
 in force.
+
+They are whole numbers of seconds, checked with the budget dials and for the
+same reason. A fractional `dead` makes `[ quiet -ge dead ]` read false at every
+poll, so the death this whole layer exists to notice is never noticed — the
+quietest failure in the tool, and the only one of these that fails **open**.
+`tier1.maxLines` is checked the same way, where the equivalent slip fails closed
+and refuses every PR with a nonsense cap printed in the reason.
 
 Both thresholds count time the poller was **awake** for. A machine that
 suspended has a stale log through nobody's fault — the watchdog was not running
@@ -417,7 +435,7 @@ saying out loud on a report about whether this machine can run a night.
 ## Development
 
 ```sh
-bats test/                                    # 135 cases
+bats test/                                    # 140 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.
