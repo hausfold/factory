@@ -133,6 +133,7 @@ factory_validate() {
       (if (.notify.mode | IN("auto","command","off") | not) then "notify.mode must be auto, command or off" else empty end),
       (if (.notify.command | type) != "array" then "notify.command must be an array of argv words, not a string" else empty end),
       (if .notify.mode == "command" and (.notify.command | type) == "array" and (.notify.command | length) == 0 then "notify.mode is command with an empty notify.command — nothing would ever be sent; write \"off\" if that is what you mean" else empty end),
+      (if (.notify.command | type) == "array" and (.notify.command | length) > 0 and ((.notify.command[0] | type) != "string" or (.notify.command[0] | length) == 0) then "notify.command starts with an empty word — there is no program there to run" else empty end),
       (if (.notify.source | type) != "string" or (.notify.source | length) == 0 then "notify.source must be a non-empty string — it is what a notification rule matches on" else empty end),
       ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number")) | if length > 0 then "budget thresholds must be numbers" else empty end),
       ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . < 1)) | if length > 0 then "watchdog thresholds must be positive numbers" else empty end),

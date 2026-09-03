@@ -86,5 +86,8 @@ run always means the run failed, never that the verb had no JSON to give.
   reporting the shift stopped being run.
 - Exit codes: `0` ok/tier 1 · `1` no lease, or an aborted pass · `2` usage or
   bad config · `3` refused / foreman stalled · `4` live lease, no poller.
+  **`doctor` is the exception**: `0` ready with nothing to note, `1` ready
+  **with notes**, `2` blocking. A ready machine usually exits 1, so read
+  `.ready` rather than the code.
 
 Then `factory --help` for the exhaustive flag list.

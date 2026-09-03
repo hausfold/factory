@@ -75,9 +75,9 @@ jobs:
           path: .snug
 
       # Exported for the WHOLE suite, not just the presentation cases: shipped,
-      # every report is painted, so that is the shape the other 86 cases should
-      # be reading. `test/presentation.bats` unsets it inside its own setup, so
-      # its no-painter cases still test the degraded path.
+      # every report is painted, so that is the shape the rest of the suite
+      # should be reading. `test/presentation.bats` unsets it inside its own
+      # setup, so its no-painter cases still test the degraded path.
       - name: bats
         run: |
           bats --version

@@ -542,6 +542,21 @@ EOF
   [[ "$output" == *"notify.command must be an array of argv words"* ]]
 }
 
+@test "a notify.command whose first word is empty is refused too" {
+  # The gap the three arms above left: a non-empty ARRAY holding an empty
+  # STRING passed every length check, `notify` ran `"" fault <title>` into
+  # `|| true`, and `doctor` reported it as `notify.command names , which is not
+  # on PATH` — a sentence with a hole in it. Only argv[0] is checked, because a
+  # later empty word is a legitimate empty argument.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] },
+  "notify": { "mode": "command", "command": ["", "--to", "me"] } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"notify.command starts with an empty word"* ]]
+}
+
 @test "an empty notify.source is a usage error, because a rule matches on it" {
   # `trill send --source ""` is the one value that cannot be routed: a rules
   # file matches on that string, so an empty one silences this tool by making
