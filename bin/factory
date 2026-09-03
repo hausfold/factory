@@ -186,7 +186,7 @@ cmd_config() {
           jq -r --argjson floor "$FACTORY_FLOOR_DENY" --arg p "$FACTORY_CONFIG_PATH" --arg d "$(factory_policy_digest)" '
             "config\t\($p)",
             "digest\t\($d)",
-            "scope\torgs \(.scope.orgs | join(", ") | if . == "" then "-" else . end)  repos \(.scope.repos | length)  excluded \(.scope.exclude | length)",
+            "scope\torgs \(.scope.orgs | join(", ") | if . == "" then "-" else . end)  repos \(.scope.repos | length)  excluded \(.scope.exclude | length)  archived \(.scope.archived)  limit \(.scope.limit)",
             "tier1\t\(.tier1.head) → \(.tier1.base), authors \(.tier1.authors | join(",")), ≤\(.tier1.maxLines) lines, green=\(.tier1.requireGreen), merge=\(.tier1.mergeMethod)",
             "allow\t\(.tier1.allow | join("  "))",
             "deny\t\((.tier1.deny + $floor) | join("  "))",
