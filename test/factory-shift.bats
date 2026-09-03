@@ -216,6 +216,58 @@ stub_usage() { # <5h %> <week %> <seconds of week left> [seconds of 5h left]
   grep -q '"fixer": 5' "$lib" && grep -q 'fixer` (5)' "$doc"
 }
 
+# ── the fifth way to be blind: an org listing cut off at the cap ──────────────
+# `gh repo list --limit` caps what comes back rather than paging past it, so an
+# org with more repos than the cap returns exactly the cap and says nothing —
+# and every repo past it is unwalked in a pass that still prints a quiet night.
+# That is the same shape as the four blind cases above, with one difference: the
+# count can only be equalled, so a truncated org and one holding exactly that
+# many are indistinguishable. It warns rather than aborting for that reason, and
+# the pass goes on.
+
+@test "an org listing that fills scope.limit says so, and the pass still runs" {
+  cat >"$TMP/config.json" <<EOF
+{
+  "scope": { "orgs": ["hausfold"], "limit": 1 },
+  "budget": { "feed": "$TMP/usage.tsv" },
+  "afterMerge": { "workdir": "$TMP/root", "commands": ["./bench pull", "./bench ship"] }
+}
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"listed 1 repos, the whole of scope.limit"* ]]
+  [[ "$output" == *"pass done: 0 merged"* ]]
+}
+
+@test "a listing short of the cap says nothing about it" {
+  # The control the case above needs: the stub lists one repo either way, so
+  # without this a warning keyed on nothing at all would pass the first case.
+  run "$SHIFT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"scope.limit"* ]]
+}
+
+@test "a scope.limit that could not cap anything is a usage error, not a pass" {
+  # `--limit 0` is rejected by gh itself, so the pass would die mid-walk with a
+  # stub's stderr quoted at it. Validation is where a nonsense policy stops.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"], "limit": 0 } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"scope.limit must be a positive number"* ]]
+}
+
+@test "the two scope defaults are still the ones the docs state" {
+  # Same double-pin as the budget dials below: a default the README quotes is a
+  # default a test reads on BOTH sides, or the edit that retunes it re-blesses
+  # the check that should have caught the doc going stale.
+  lib="$BATS_TEST_DIRNAME/../lib/common.sh"
+  doc="$BATS_TEST_DIRNAME/../README.md"
+  grep -q '"archived": false' "$lib" && grep -qF 'archived` (`false`)' "$doc"
+  grep -q '"limit": 100' "$lib" && grep -qF 'limit` (100)' "$doc"
+}
+
 @test "an early-week burst with the week mostly unspent can still afford a fixer" {
   # A sixth of the week's budget gone with 84% of its clock left. Bursty is how
   # this account is actually spent, so if this shape cannot get through, the
