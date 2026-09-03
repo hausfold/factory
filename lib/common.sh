@@ -131,6 +131,9 @@ factory_validate() {
       (if (.scope.limit | type) != "number" or .scope.limit < 1 then "scope.limit must be a positive number" else empty end),
       (if (.budget.mode | IN("metered","unmetered") | not) then "budget.mode must be metered or unmetered" else empty end),
       (if (.notify.mode | IN("auto","command","off") | not) then "notify.mode must be auto, command or off" else empty end),
+      (if (.notify.command | type) != "array" then "notify.command must be an array of argv words, not a string" else empty end),
+      (if .notify.mode == "command" and (.notify.command | type) == "array" and (.notify.command | length) == 0 then "notify.mode is command with an empty notify.command — nothing would ever be sent; write \"off\" if that is what you mean" else empty end),
+      (if (.notify.source | type) != "string" or (.notify.source | length) == 0 then "notify.source must be a non-empty string — it is what a notification rule matches on" else empty end),
       ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number")) | if length > 0 then "budget thresholds must be numbers" else empty end),
       ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . < 1)) | if length > 0 then "watchdog thresholds must be positive numbers" else empty end),
       (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end)

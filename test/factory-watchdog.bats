@@ -524,3 +524,14 @@ EOF
   [ "$status" -eq 2 ]
   [[ "$output" == *"factory watchdog once"* ]]
 }
+
+# The same double-pin the scope and budget defaults carry, one suite over: the
+# README quotes all three thresholds, so a retune that only edits the code
+# would otherwise leave the manual saying 45 and 90 with nothing red.
+@test "the three watchdog defaults are still the ones the README states" {
+  lib="$BATS_TEST_DIRNAME/../lib/common.sh"
+  doc="$BATS_TEST_DIRNAME/../README.md"
+  grep -q '"stale": 2700' "$lib" && grep -qF '`watchdog.stale`, 2700' "$doc"
+  grep -q '"dead": 5400' "$lib" && grep -qF '`watchdog.dead`, 5400' "$doc"
+  grep -q '"interval": 300' "$lib" && grep -qF '`watchdog.interval` (300' "$doc"
+}

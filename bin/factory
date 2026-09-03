@@ -192,7 +192,7 @@ cmd_config() {
             "deny\t\((.tier1.deny + $floor) | join("  "))",
             "budget\t\(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
             "after\t\(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
-            "notify\t\(.notify.mode), source \(.notify.source)",
+            "notify\t\(.notify.mode), source \(.notify.source), command \(if (.notify.command | length) == 0 then "-" else (.notify.command | join(" ")) end)",
             "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
       )"
       while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done <<<"$rows"
