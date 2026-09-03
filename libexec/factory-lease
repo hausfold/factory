@@ -44,14 +44,56 @@ EOF
 }
 
 parse_duration() { # 30m / 12h / 2d → seconds
+  # The number half is SPLIT OFF first and checked before anything computes
+  # on it, because every way of not being a number here is quiet one frame
+  # later. The unit arms only say where to cut and by how much to multiply.
+  local n mult bare secs
   case "$1" in
-  *[!0-9smhd]*) die "bad duration '$1' (use 30m, 12h, 2d)" ;;
-  *m) echo $((${1%m} * 60)) ;;
-  *h) echo $((${1%h} * 3600)) ;;
-  *d) echo $((${1%d} * 86400)) ;;
-  *s) echo "${1%s}" ;;
-  *)  die "bad duration '$1' (use 30m, 12h, 2d)" ;;
+  *m) n="${1%m}"; mult=60 ;;
+  *h) n="${1%h}"; mult=3600 ;;
+  *d) n="${1%d}"; mult=86400 ;;
+  *s) n="${1%s}"; mult=1 ;;
+  # No unit to cut at: the empty `n` is what refuses it two lines down, and
+  # `mult` is 0 because nothing may reach the division below on this arm.
+  *)  n=""; mult=0 ;;
   esac
+  # `num` (lib/common.sh) is what already answers "a non-empty run of digits"
+  # for the feed's columns and this file's own lease fields. Asked here, it
+  # is what catches a unit with no digits in front of it: `${1%h}` on "h"
+  # leaves "", and `$(( * 3600))` is a bash arithmetic syntax error — the
+  # user gets that raw message at exit 1, where every other refusal in this
+  # verb is `die` at exit 2, the usage row of the exit-code table. On "s" the
+  # same "" is worse, because "" is a VALID arithmetic operand (0). It also
+  # catches "1h2m", "5.5h" and a bare "12": each leaves a remainder that is
+  # not digits, or no unit to cut at all.
+  num "$n" || die "bad duration '$1' (use 30m, 12h, 2d)"
+  # Leading zeros are not magnitude, so they come off before the length is
+  # measured: `0000001m` is one minute, not a complaint about size.
+  bare="$n"
+  while [ "${bare#0}" != "$bare" ]; do bare="${bare#0}"; done
+  # Refused on the STRING, because bash counts in signed 64-bit and `10#`
+  # turns the digits into a number before anything here could compare them.
+  # 2^63 wraps to negative, which the zero check below would then refuse with
+  # a sentence that is not true of what was typed.
+  [ "${#bare}" -le 18 ] ||
+    die "duration '$1' is more seconds than this machine can count"
+  # 10# because `num` passes a leading zero and bash reads one as octal. `08h`
+  # is then a fatal "value too great for base" — raw, on fd 2, exit 1 again —
+  # and `010m` is worse for being survivable: it grants EIGHT minutes wearing
+  # a ten. The feed columns are read through the same prefix, one file over.
+  n=$((10#$n))
+  # Zero grants cleanly, marks the line ✓, and is expired by the time `status`
+  # reads it back.
+  [ "$n" -gt 0 ] ||
+    die "duration '$1' is zero — a lease granted for no time is one already expired"
+  # The multiply leaves the range even where the number did not. What that
+  # wrap costs is on the `grant` arm, which checks the other half — this
+  # function cannot see the clock its answer is added to.
+  secs=$((n * mult))
+  if [ "$secs" -le 0 ] || [ "$((secs / mult))" != "$n" ]; then
+    die "duration '$1' is more seconds than this machine can count"
+  fi
+  echo "$secs"
 }
 
 emit() { # emit <live> <tier> <expires> <granted> <human line>
@@ -77,9 +119,25 @@ grant)
   secs=$(parse_duration "$2")
   tier="${3:-1}"
   [ "$tier" = 1 ] || die "only tier 1 exists — widen tier1.allow instead; a wider grant would be a new tier value here"
+  # The EXPIRY is what gets written, so it is checked here, where the clock it
+  # is added to is in scope. Both ways of not being one are the same failure to
+  # whoever reads the line: `now + secs` past 2^63 wraps negative, and `status`
+  # then calls the state file this verb has just written unreadable; an expiry
+  # `date` will not format leaves the ✓ ending on a bare "until", because `at`
+  # answers with nothing. A duration can clear parse_duration and still land
+  # on either — 106751991167300d multiplies without wrapping.
+  expires=$((now + secs))
+  # `|| when=""` because a `date` that refuses the stamp exits non-zero, and
+  # under `set -e` that status inside a command substitution ends the script
+  # before the check below can turn it into a sentence. The empty answer IS
+  # the signal here, so it is caught rather than propagated.
+  when=$(at "$expires") || when=""
+  if [ "$expires" -le "$now" ] || [ -z "$when" ]; then
+    die "duration '$2' puts the expiry past what this machine can represent"
+  fi
   mkdir -p "$FACTORY_STATE_DIR"
-  printf '%s\t%s\t%s\n' "$((now + secs))" "$tier" "$now" >"$LEASE"
-  emit true "$tier" "$((now + secs))" "$now" "lease: tier $tier until $(at $((now + secs)))"
+  printf '%s\t%s\t%s\n' "$expires" "$tier" "$now" >"$LEASE"
+  emit true "$tier" "$expires" "$now" "lease: tier $tier until $when"
   # A live lease always has a watchdog, and it is started HERE rather than by
   # the foreman so the invariant is structural: the one thing that must not
   # depend on the agent still working is the thing that notices it stopped.

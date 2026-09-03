@@ -16,6 +16,13 @@
 # harder still: it fires only when the foreman is gone, so nobody ever sees it
 # work on a good night. `test/factory-watchdog.bats` writes lease files and ages
 # logs directly to make every stall shape observable on a runner.
+#
+# `factory-lease` was only ever reached as somebody else's fixture — a grant to
+# start the poller above, a lease file written directly, a `chmod -x` to make
+# `doctor` report it missing — so nothing had handed `grant` a duration nobody
+# would type. `test/factory-lease.bats` is the verb's own, and its subject is
+# the same shape as the three above: a grant that prints ✓ and is already
+# expired is worse than one that crashes.
 name: Tests
 
 on:
