@@ -535,3 +535,28 @@ EOF
   grep -q '"dead": 5400' "$lib" && grep -qF '`watchdog.dead`, 5400' "$doc"
   grep -q '"interval": 300' "$lib" && grep -qF '`watchdog.interval` (300' "$doc"
 }
+
+@test "a fractional watchdog threshold is refused, not a death nobody notices" {
+  # The budget dials' hole, one block over and worse. `[ "$quiet" -ge "5400.5" ]`
+  # complains to stderr and returns non-zero, which the `if` reads as false — at
+  # every poll, forever. So the foreman death this whole layer exists to notice
+  # is never noticed and the lease stands until morning. `type == "number"` was
+  # true of it and `> 1` was true of it; only wholeness is not.
+  printf '{"scope":{"orgs":["hausfold"]},"watchdog":{"dead":5400.5}}\n' >"$TMP/config.json"
+  run "$WD" once
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"watchdog thresholds must be whole numbers of seconds"* ]]
+}
+
+@test "a fractional tier1.maxLines is refused, and that one fails closed" {
+  # The same slip where the consequence inverts: `[ "$churn" -le "2000.5" ]`
+  # reads false too, so every PR is refused with a cap nobody can read printed
+  # in the reason. Named beside the watchdog case because the pair is the
+  # argument for checking wholeness at all — one direction of this mistake is
+  # invisible and one is deafening, and the policy file cannot tell you which
+  # you typed.
+  printf '{"scope":{"orgs":["hausfold"]},"tier1":{"maxLines":2000.5}}\n' >"$TMP/config.json"
+  run "$WD" once
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"tier1.maxLines must be a whole number of lines"* ]]
+}
