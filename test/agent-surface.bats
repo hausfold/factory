@@ -43,6 +43,17 @@ setup() {
   cp "$BATS_TEST_DIRNAME"/../lib/*.sh "$ROOT/lib/"
   cp "$BATS_TEST_DIRNAME"/../libexec/* "$ROOT/libexec/"
   cp "$BATS_TEST_DIRNAME/../VERSION" "$ROOT/"
+  # `skill` reads `ai/` off FACTORY_HOME, and it reads the DIRECTORY rather
+  # than a list — a $ROOT without it turns every case below into "no such
+  # skill" against a tool that ships two.
+  #
+  # Read-only, because that is the SHIPPED shape: `flake.nix` copies `ai/` into
+  # the store and store files are 444, so `cp` inheriting the source's mode is
+  # what a Nix-installed factory actually does. A fixture taken from a writable
+  # checkout is 644 and would leave the "install twice" case green forever. The
+  # files only — the directories stay writable so bats can clean its tmpdir.
+  cp -R "$BATS_TEST_DIRNAME/../ai" "$ROOT/ai"
+  chmod a-w "$ROOT"/ai/SKILL.md "$ROOT"/ai/*/SKILL.md
   FACTORY="$ROOT/bin/factory"
 
   export HOME="$TMP/home"
@@ -314,4 +325,211 @@ EOF
   # it for the reader `doctor` was written for.
   run env FACTORY_UI_SH="$UI_SH" TERM=xterm-256color CLICOLOR_FORCE=1 "$FACTORY" doctor
   [[ "$output" == *$'\033'* ]]
+}
+
+# ── the verb a stranger runs ──────────────────────────────────────────────────
+#
+# `skill install` is the whole standalone install: a haus machine gets these
+# files from `haus.ai.skill` and never calls this, so nothing else on the
+# machine exercises it and nothing here did either — it was the one verb of the
+# dispatcher with no case at all. Four of the cases below are regressions found
+# by running it rather than reading it.
+#
+# It is also the verb that WRITES into $HOME, which is why every case names its
+# destination: a bug here is not a wrong exit code, it is a file in a directory
+# the caller did not ask for.
+
+@test "skill prints the tool's own document, and a named sibling" {
+  run "$FACTORY" skill
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"name: factory"* ]]
+  run "$FACTORY" skill nightshift
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"name: nightshift"* ]]
+}
+
+@test "a skill this tool does not ship is a refusal on fd 2, not an empty document" {
+  run --separate-stderr "$FACTORY" skill nosuch
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"no such skill 'nosuch'"* ]]
+}
+
+# ⚠ REGRESSION. `--dir` with nothing after it reached `shift 2` with one
+# positional left, which returns 1 — and under `set -e` ended the verb there,
+# with nothing on either stream and the exit code this tool documents as
+# "nothing to do". A typo read as a no-op.
+@test "a flag with no value is a usage refusal, not a silent exit" {
+  run --separate-stderr "$FACTORY" skill install --dir
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"--dir needs a path"* ]]
+  run --separate-stderr "$FACTORY" skill install --client
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"--client needs one of"* ]]
+}
+
+# ⚠ REGRESSION, and the one that wrote files. An empty value is an unset shell
+# variable — `factory skill install --dir "$scratch"` with `scratch` unset —
+# and it used to fall through to discovery, installing into every agent client
+# on the machine while the caller believed it had named one throwaway path.
+@test "an empty flag value writes nowhere, rather than everywhere" {
+  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  run --separate-stderr "$FACTORY" skill install --dir ""
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"--dir needs a path"* ]]
+  run --separate-stderr "$FACTORY" skill install --client ""
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"--client needs one of"* ]]
+  [ -z "$(find "$HOME" -name SKILL.md)" ]
+}
+
+# Two answers to "where", where only one can be honoured.
+@test "--dir and --client together are refused rather than silently ranked" {
+  run --separate-stderr "$FACTORY" skill install --dir "$TMP/scratch" --client claude
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"both name a destination"* ]]
+  [ ! -d "$TMP/scratch" ]
+}
+
+@test "an unknown client and an unknown flag both name what was expected" {
+  run --separate-stderr "$FACTORY" skill install --client emacs
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"unknown client 'emacs'"* ]]
+  [[ "$stderr" == *"claude, codex, opencode, pi"* ]]
+  run --separate-stderr "$FACTORY" skill install --into "$TMP/x"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"unknown flag '--into'"* ]]
+}
+
+# `install` means ALL of them: a tool that ships a second skill and installs
+# only its first reaches no standalone user with it.
+@test "install writes every skill this tool ships, one directory each" {
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/scratch/factory/SKILL.md" ]
+  [ -f "$TMP/scratch/nightshift/SKILL.md" ]
+  [[ "$output" == *"2 written, 0 left alone"* ]]
+}
+
+@test "a machine with no agent client is told which flag would have answered" {
+  run --separate-stderr "$FACTORY" skill install
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"no agent client found"* ]]
+}
+
+# Discovery is by the client's PARENT existing — `~/.claude` is what says this
+# machine has Claude Code, because the skills directory is what we are about to
+# create.
+@test "install finds a client by its parent, and leaves the others alone" {
+  mkdir -p "$HOME/.claude"
+  run "$FACTORY" skill install
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.claude/skills/factory/SKILL.md" ]
+  [ ! -d "$HOME/.codex" ]
+}
+
+# A symlink belongs to whatever manages that link; on a haus machine that is
+# `haus.ai.skill` and the target is read-only anyway. Skipping is right, and so
+# is exiting 0 for it: the end state is holding. The rest of the run still runs.
+@test "a symlinked skill is left alone, and the rest of the run still lands" {
+  # The link RESOLVES: a dangling one is a different answer, one case down.
+  mkdir -p "$HOME/.claude/skills" "$TMP/store/factory"
+  ln -s "$TMP/store/factory" "$HOME/.claude/skills/factory"
+  run "$FACTORY" skill install --client claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"haus.ai.skill already did"* ]]
+  [ -f "$HOME/.claude/skills/nightshift/SKILL.md" ]
+  [ -L "$HOME/.claude/skills/factory" ]
+}
+
+# The haus machine, whole: every skill is already a read-only symlink haus put
+# there. That is the desired end state, so it is a sentence and an exit 0 — a
+# non-zero here would have an agent report a broken command and retry with
+# more force, against a directory where force corrupts a generation.
+@test "a run that finds only symlinks says so, and does not read as a failure" {
+  mkdir -p "$TMP/scratch" "$TMP/store/factory" "$TMP/store/nightshift"
+  ln -s "$TMP/store/factory" "$TMP/scratch/factory"
+  ln -s "$TMP/store/nightshift" "$TMP/scratch/nightshift"
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to install"* ]]
+  [[ "$output" == *"--dir"* ]]
+  [[ "$output" != *"0 written"* ]]
+}
+
+# The other two skips are the caller's request NOT honoured, and they are what
+# the exit code is for.
+@test "a file that exists and differs is left alone, with the path to diff it against" {
+  mkdir -p "$TMP/scratch/factory"
+  printf 'someone edited this\n' >"$TMP/scratch/factory/SKILL.md"
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"exists and differs"* ]]
+  [ "$(cat "$TMP/scratch/factory/SKILL.md")" = "someone edited this" ]
+}
+
+# ⚠ REGRESSION, and the one the suite could not have caught from a checkout.
+# The shipped `ai/` is 444 and `cp` inherits the SOURCE's mode, so every copy
+# landed read-only and the second run of the documented command reported a
+# refusal nothing had refused. `chmod u+w` is the line haus's own install has
+# carried all along; this port dropped it.
+@test "installing twice is not a refusal — the copy it wrote stays writable" {
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 0 ]
+  [ -w "$TMP/scratch/factory/SKILL.md" ]
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2 written, 0 left alone"* ]]
+}
+
+# `-L` is true for a link whose target is gone, so a collected store path used
+# to read as "haus has this in hand" — a green exit at the one moment the skill
+# is unloadable.
+@test "a symlink whose target is gone is a refusal, not the end state holding" {
+  mkdir -p "$TMP/scratch"
+  ln -s "$TMP/nowhere/factory" "$TMP/scratch/factory"
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"target is gone"* ]]
+  [[ "$output" != *"nothing to install"* ]]
+}
+
+# `cp` into a directory copies INTO it, so this printed ✓ for a
+# `SKILL.md/SKILL.md` no client will ever load.
+@test "a directory standing where the file goes is refused, not written into" {
+  mkdir -p "$TMP/scratch/factory/SKILL.md"
+  run "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"a directory is in the way"* ]]
+  [ ! -e "$TMP/scratch/factory/SKILL.md/SKILL.md" ]
+}
+
+# A fourth way to install nothing: a tree with no skills in it reported
+# "0 written, 0 left alone" and exited 0, having created nothing.
+@test "a tree with no skills is a broken install, not a quiet success" {
+  rm -rf "$ROOT/ai"
+  run --separate-stderr "$FACTORY" skill install --dir "$TMP/scratch"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"this install is incomplete"* ]]
+  [ ! -d "$TMP/scratch" ]
+}
+
+# ⚠ REGRESSION. `mkdir -p` was unguarded, so a read-only client directory ended
+# the whole verb at that file: a bare `mkdir: Permission denied` on fd 2, exit
+# 1, and every client AFTER this one silently given nothing. The clients are
+# walked in a fixed order, so whose skills went missing depended on alphabet.
+@test "a client directory that cannot be written does not abandon the ones after it" {
+  # Root ignores the mode bits this case sets, which would invert it rather
+  # than fail it. CI runs as a normal user; a devcontainer may not.
+  [ "$(id -u)" != 0 ] || skip "root writes through the mode bits this case sets"
+  mkdir -p "$HOME/.claude/skills" "$HOME/.codex/skills"
+  chmod a-w "$HOME/.claude/skills"
+  run "$FACTORY" skill install
+  chmod u+w "$HOME/.claude/skills"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"cannot write it"* ]]
+  [ -f "$HOME/.codex/skills/factory/SKILL.md" ]
+  [ -f "$HOME/.codex/skills/nightshift/SKILL.md" ]
 }

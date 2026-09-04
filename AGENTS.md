@@ -69,7 +69,11 @@ that comes from the user's config, always.
   --json` printed the human checklist and exited 0 for as long as `cmd_doctor`
   never looked at `$@`, and an agent handed prose back cannot tell "this verb
   has no JSON" from "the JSON is malformed". Every verb parses its own flags and
-  dies on one it does not know — on fd 2, with nothing on fd 1.
+  dies on one it does not know — on fd 2, with nothing on fd 1. A flag it DOES
+  know, handed no value or an empty one, is the same refusal: `shift 2` past the
+  end of `$@` returns 1 and `set -e` turns that into an exit with nothing on
+  either stream, and an empty value is an unset shell variable rather than a
+  request — falling through to a default there acts on a request nobody made.
   `test/agent-surface.bats` is what holds the dispatcher to that, and a new flag
   belongs in the same edit as the case that proves the old ones still refuse.
 - **One verb never parses another's human line.** `shift` asks `tier` and

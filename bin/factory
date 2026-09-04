@@ -46,9 +46,11 @@ usage:
   factory --help · --version
 
 exit codes
-  0  ok / tier 1 / healthy       3  refused (not tier 1) · stalled foreman
-  1  nothing (no lease) · pass   4  live lease with no poller watching it
-     aborted                     2  usage, or a config that cannot be used
+  0  ok / tier 1 / healthy       3  refused (not tier 1) · stalled foreman ·
+  1  nothing (no lease) · pass      a skill install only partly honoured
+     aborted                     4  live lease with no poller watching it
+  2  usage, or a config that
+     cannot be used
 
 The policy lives in one machine-local file — `factory config path` — because a
 copy inside a watched repo would be a file a PR could edit to widen the filter
@@ -84,23 +86,42 @@ cmd_skill() {
 }
 
 cmd_skill_install() {
-  local dir="" client="" wrote=0 skipped=0
+  # `nixed` is counted apart from `skipped` because the two are opposite
+  # answers wearing the same word. A symlink is haus's own install holding —
+  # the desired end state — and a non-zero there would have every agent on a
+  # normal haus machine report a broken command and retry with more force. A
+  # file that differs, or one this cannot write, is the caller's request NOT
+  # honoured, and that is what the exit code is for.
+  local dir="" client="" wrote=0 skipped=0 nixed=0
+  local clients="claude, codex, opencode, pi"
   while [ $# -gt 0 ]; do
     case "$1" in
-    --dir) dir="${2:-}"; shift 2 ;;
-    --client) client="${2:-}"; shift 2 ;;
-    *) die "unknown flag '$1'" ;;
+    # The emptiness check comes BEFORE the shift, and it is two guards in one
+    # line. A trailing `--dir` with nothing after it reaches `shift 2` with one
+    # positional left, which returns 1 and — under `set -e` — ends the verb
+    # with no message on either stream, spending on a typo the code this tool
+    # documents as "nothing to do". And an empty value is an unset shell
+    # variable rather than a request: falling through to discovery there would
+    # write into every agent client on the machine while the caller believed it
+    # had named one scratch path.
+    --dir) dir="${2:-}"; [ -n "$dir" ] || die "--dir needs a path"; shift 2 ;;
+    --client) client="${2:-}"; [ -n "$client" ] || die "--client needs one of: $clients"; shift 2 ;;
+    *) die "unknown flag '$1' — usage: factory skill install [--client claude|codex|opencode|pi] [--dir PATH]" ;;
     esac
   done
+  # Two answers to "where", where only one can be honoured. Picking silently
+  # would write somewhere the caller named a different path for.
+  [ -z "$dir" ] || [ -z "$client" ] ||
+    die "--dir and --client both name a destination — pass one"
   local -a targets=()
   if [ -n "$dir" ]; then
     targets=("$dir")
   elif [ -n "$client" ]; then
     local d
-    d="$(client_dir "$client")" || die "unknown client '$client'"
+    d="$(client_dir "$client")" || die "unknown client '$client' — one of: $clients"
     targets=("$d")
   else
-      local c d
+    local c d
     for c in claude codex opencode pi; do
       d="$(client_dir "$c")"
       [ -d "$(dirname "$d")" ] && targets+=("$d")
@@ -111,30 +132,86 @@ cmd_skill_install() {
   # Every skill this tool ships, discovered rather than listed: a tool that
   # ships a second skill and installs only its first reaches no standalone user
   # with it.
-  local src name dest t
+  local src name dest t err link
+  # Gathered before anything is written, because an empty `ai/` is a broken
+  # install rather than a quiet success: the loop below would write nothing and
+  # the summary would report a zero as though zero had been asked for.
+  local -a sources=()
+  for src in "$FACTORY_HOME/ai/SKILL.md" "$FACTORY_HOME"/ai/*/SKILL.md; do
+    [ -f "$src" ] && sources+=("$src")
+  done
+  [ "${#sources[@]}" -gt 0 ] ||
+    die "no skills under $FACTORY_HOME/ai — this install is incomplete"
+
   for t in "${targets[@]}"; do
-    for src in "$FACTORY_HOME/ai/SKILL.md" "$FACTORY_HOME"/ai/*/SKILL.md; do
-      [ -f "$src" ] || continue
+    for src in "${sources[@]}"; do
       name=factory
       [ "$src" = "$FACTORY_HOME/ai/SKILL.md" ] || name="$(basename "$(dirname "$src")")"
       dest="$t/$name/SKILL.md"
       # A haus machine has already installed this, as a read-only Nix symlink.
-      # Say so, rather than making the user work it out from an EPERM.
-      if [ -L "$t/$name" ] || [ -L "$dest" ]; then
-        out_info "skipped $dest — a symlink, so something else manages it (on a haus machine, haus.ai.skill already did)"
-        skipped=$((skipped + 1)); continue
+      # Say so, rather than making the user work it out from an EPERM. Which of
+      # the two paths is the link matters: haus links the DIRECTORY, a
+      # hand-wired host may link the file, and the answer below differs for a
+      # link that resolves and one that does not.
+      link=""
+      if [ -L "$t/$name" ]; then link="$t/$name"
+      elif [ -L "$dest" ]; then link="$dest"; fi
+      if [ -n "$link" ]; then
+        # `-L` is true for a link whose target is gone — a store path collected,
+        # a checkout deleted — and reporting THAT as the end state holding
+        # declines at the one moment the skill is actually unloadable.
+        if [ -e "$link" ]; then
+          out_info "skipped $dest — a symlink, so something else manages it (on a haus machine, haus.ai.skill already did)"
+          nixed=$((nixed + 1))
+        else
+          out_warn "skipped $dest — $link is a symlink whose target is gone; delete it and run this again"
+          skipped=$((skipped + 1))
+        fi
+        continue
       fi
       if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
         out_warn "skipped $dest — exists and differs; diff it against $src"
         skipped=$((skipped + 1)); continue
       fi
-      mkdir -p "$(dirname "$dest")"
-      cp "$src" "$dest"
+      # A directory standing where the file goes is neither of the above, and
+      # `cp` would copy INTO it — a ✓ for a `SKILL.md/SKILL.md` no client loads.
+      if [ -d "$dest" ]; then
+        out_warn "skipped $dest — a directory is in the way of the file"
+        skipped=$((skipped + 1)); continue
+      fi
+      # A directory this cannot write into is the same answer as a symlink it
+      # must not write through, and it has to be per-file: aborting here — which
+      # is what an unguarded `mkdir` under `set -e` does — abandons every client
+      # AFTER this one on a machine whose first client directory is read-only,
+      # and hands back the bare EPERM this verb exists to replace with a
+      # sentence.
+      #
+      # `chmod u+w` and not decoration: `cp` inherits the SOURCE's mode, and a
+      # Nix-installed factory's `ai/` is 444, so without this every copy lands
+      # read-only and the NEXT run reports it as a refusal the user cannot act
+      # on. haus's own install carries the same line for the same reason.
+      if ! err="$({ mkdir -p "$(dirname "$dest")" &&
+        cp "$src" "$dest" && chmod u+w "$dest"; } 2>&1)"; then
+        out_warn "skipped $dest — cannot write it${err:+: ${err##*: }}"
+        skipped=$((skipped + 1)); continue
+      fi
       out_ok "wrote $dest"
       wrote=$((wrote + 1))
     done
   done
-  out_info "skills: $wrote written, $skipped left alone"
+  # The whole run was haus's own install holding. Say that in a sentence rather
+  # than as a count of zero, and exit 0: nothing was asked for that did not
+  # already exist.
+  if [ "$wrote" = 0 ] && [ "$skipped" = 0 ] && [ "$nixed" -gt 0 ]; then
+    out_info "nothing to install: every skill here is already a symlink something else manages (on a haus machine, haus.ai.skill)"
+    out_info "to place a copy somewhere nothing else manages: factory skill install --dir <path>"
+    return 0
+  fi
+  out_info "skills: $wrote written, $((nixed + skipped)) left alone"
+  # Non-zero so a caller learns its request was only partly honoured — "3
+  # refused" reads here the way it reads for `tier`: understood, and declined.
+  # Only `skipped` counts: a symlink was never this verb's file to write.
+  [ "$skipped" = 0 ] || exit 3
 }
 
 cmd_config() {
