@@ -54,7 +54,7 @@ Plus the surface around them: `factory config print`, `factory doctor`,
 | **0** | ok · tier 1 · foreman healthy · `doctor` ready with nothing to note |
 | **1** | nothing (no live lease) · a pass that aborted having sensed nothing · `doctor` ready **with notes** |
 | **2** | usage, or a config that cannot be used · `doctor` blocking |
-| **3** | refused (not tier 1) · foreman stalled |
+| **3** | refused (not tier 1) · foreman stalled · a `skill install` only partly honoured |
 | **4** | a live lease with no poller watching it |
 
 **`doctor` is the one verb whose 1 is not a refusal**, and it is the row to
@@ -348,7 +348,23 @@ whether a red branch is worth a fixer, and write the handover — that is the
 ```sh
 factory skill            # the routing document for a coding agent
 factory skill install    # into every agent client on this machine
+factory skill install --client claude   # or codex, opencode, pi
+factory skill install --dir PATH        # somewhere else entirely
 ```
+
+`install` writes every skill this tool ships, one directory each, and refuses
+rather than clobbers. A file that exists and differs is left alone with the
+path to diff it against, and so is a client directory it cannot write into;
+either of those exits **3**, so a caller can tell a run that was only partly
+honoured from one that installed everything. An **upgrade** reads as the first
+of those: once a copy exists, a newer skill is a file that differs, so delete
+the old one to take it.
+
+A skill already behind a **symlink** is not one of those. On a haus machine
+`haus.ai.skill` owns those paths and they are read-only, which is the end state
+holding rather than a failure, so a run that finds only symlinks says so and
+exits **0**. A non-zero there would have every agent on such a machine report a
+broken command and try again with more force.
 
 An agent that has the skill knows the verbs, the log vocabulary, the four
 unknown lines, and the two rules that matter: never merge outside
@@ -435,7 +451,7 @@ saying out loud on a report about whether this machine can run a night.
 ## Development
 
 ```sh
-bats test/                                    # 164 cases
+bats test/                                    # 181 cases
 shellcheck bin/factory libexec/* lib/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

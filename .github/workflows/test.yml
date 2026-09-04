@@ -23,6 +23,20 @@
 # would type. `test/factory-lease.bats` is the verb's own, and its subject is
 # the same shape as the three above: a grant that prints ✓ and is already
 # expired is worse than one that crashes.
+#
+# `skill install` is the one verb a haus machine never calls — `haus.ai.skill`
+# puts those files there — so it is only ever run by a stranger, once, and its
+# failures were silent in five different ways: a flag with no value ended the
+# verb with nothing on either stream, an empty one installed into every client
+# on the machine, a read-only client directory abandoned every client after it,
+# a tree with no skills reported a zero as though zero had been asked for, and
+# `cp` inheriting a 444 store file made every installed copy read-only for the
+# next run to refuse. That last one is why the fixture's `ai/` is chmod'd
+# read-only in setup: taken from a writable checkout it is 644, and the case
+# would stay green against the tree this repo actually ships.
+# `test/agent-surface.bats` covers the verb beside `config` and `doctor`,
+# because the question is the same one: what the dispatcher does with an
+# argument nobody would type.
 name: Tests
 
 on:
