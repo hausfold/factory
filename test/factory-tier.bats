@@ -487,6 +487,81 @@ EOF
   [[ "$output" == *"not valid JSON"* ]]
 }
 
+# ── ⚠ regression: a policy the filter cannot run is refused at load ──────────
+# Each of these reached the jq filter before this suite, and the filter died on
+# it: exit 5, which `factory-shift` files as `tier-unknown` — for every PR, all
+# night, under a `doctor` that had read the same file and said ready. Not
+# silent, but a night lost to a typo the load could have named.
+
+@test "⚠ a tier1.allow written as a string is refused at load, not a night of tier-unknown" {
+  # `"^docs/" | length` is 6, so the "is empty" check passed it, and
+  # `$allow | any(...)` then died on iterating a string.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {allow: "^docs/"}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"tier1.allow must be an array of non-empty strings"* ]]
+
+  # `deny` is added to the floor before the filter runs, and a string and an
+  # array cannot be added.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {deny: "^foo/"}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"tier1.deny must be an array of non-empty strings"* ]]
+}
+
+@test "⚠ an empty allow pattern is refused — it matches every path there is" {
+  # `[""]` is not `[]`, so the emptiness check let it through, and `test("")`
+  # is true of any string: the narrowest-looking policy was the widest one.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {allow: [""]}}'
+  files ".github/workflows/ci.yml"
+  pr
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"tier1.allow must be an array of non-empty strings"* ]]
+}
+
+@test "⚠ an empty or null tier1.head is refused — it would match every branch" {
+  config '{scope: {orgs: ["hausfold"]}, tier1: {head: ""}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"tier1.head must be a branch pattern"* ]]
+
+  # `jq -r` prints null as the four letters, and "null" is a regex that matches
+  # a branch named after it — a filter that reads as "no head rule" and is
+  # actually a rule nobody wrote.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {head: null}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"tier1.head must be a branch pattern"* ]]
+}
+
+@test "⚠ a pattern jq cannot compile is refused at load, and named" {
+  config '{scope: {orgs: ["hausfold"]}, tier1: {allow: ["^docs/", "[md$"]}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not a regular expression jq can compile"* ]]
+  [[ "$output" == *'"[md$"'* ]]
+
+  # The same engine, in `head` and in `deny`: one check over all three lists.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {head: "^(worktree-"}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"^(worktree-"'* ]]
+
+  config '{scope: {orgs: ["hausfold"]}, tier1: {deny: ["*.lock"]}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"*.lock"'* ]]
+}
+
+@test "a policy that compiles still runs — the compile check refuses nothing else" {
+  # The control: every pattern the default policy ships, plus a deny with a
+  # character class and an anchor, through the same load.
+  config '{scope: {orgs: ["hausfold"]}, tier1: {deny: ["^[Cc]hangelog\\.md$", "\\.lock$"]}}'
+  run "$TIER" perch 7
+  [ "$status" -eq 0 ]
+}
+
 # ── --json, the shape an agent reads ──────────────────────────────────────────
 
 @test "--json carries the verdict, the head SHA and a null reason" {

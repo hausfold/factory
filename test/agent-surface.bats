@@ -300,6 +300,24 @@ EOF
   [[ "$stderr" == *"config init takes no flags"* ]]
 }
 
+# ⚠ REGRESSION. `doctor` read `.afterMerge.commands | length` off a string and
+# reported its character count as a command count, ✓ — while the pass those
+# commands were for iterated the same string with `.[]?` and ran nothing. The
+# one verb whose job is to say whether a night can run approved the config
+# that would make it run silent.
+@test "doctor refuses a config whose lists are strings, rather than counting their letters" {
+  printf '{"scope":{"orgs":["hausfold"]},"afterMerge":{"commands":"make lockfiles"}}\n' >"$FACTORY_CONFIG"
+  run --separate-stderr "$FACTORY" doctor
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"afterMerge.commands must be an array of non-empty strings"* ]]
+  [[ "$output" != *"14 command"* ]]
+  # And the same document under --json: a blocking config is exit 2 either way,
+  # never a `ready: true` with a check that happened to parse.
+  run --separate-stderr "$FACTORY" doctor --json
+  [ "$status" -eq 2 ]
+  [[ "$output" != *'"ready":true'* ]]
+}
+
 @test "config path is still a bare path on fd 1" {
   run --separate-stderr "$FACTORY" config path
   [ "$status" -eq 0 ]
