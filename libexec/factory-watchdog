@@ -80,18 +80,65 @@ LEASECMD="$(dirname "$SELF")/factory-lease"
 LEASE="$FACTORY_STATE_DIR/lease"
 PIDFILE="$FACTORY_STATE_DIR/watchdog.pid"
 # Env beats config so a suite can make a 45-minute threshold reachable in
-# seconds without writing a config file for every case.
-STALE="${FACTORY_STALE:-$(cfg .watchdog.stale)}"
-DEAD="${FACTORY_DEAD:-$(cfg .watchdog.dead)}"
-INTERVAL="${FACTORY_WATCHDOG_INTERVAL:-$(cfg .watchdog.interval)}"
+# seconds without writing a config file for every case — and only DOWNWARD. A
+# poller inherits the environment of whoever ran `lease grant`, and on a night
+# shift that is the foreman: a variable that could lengthen `dead` is a foreman
+# able to keep its lease after it dies, which is the one thing this script
+# exists to take away. Refused rather than clamped, because a number that was
+# set and silently not used is the swallow every verb here refuses — and
+# `config print`'s watchdog row is then still what is in force.
+threshold() { # threshold <env var> <watchdog key>
+  local from_cfg from_env
+  from_cfg=$(cfg ".watchdog.$2")
+  from_env="${!1:-}"
+  if [ -z "$from_env" ]; then printf '%s\n' "$from_cfg"; return 0; fi
+  # Digits, at most 18 of them, then read in base 10 — the lease's own three
+  # rules for a number a person typed, for the same three reasons: a 19-digit
+  # value turns `-le` into a `[` complaint on stderr before the refusal, and
+  # `010` is eight in `$((INTERVAL * 2))` and ten in `sleep`.
+  if num "$from_env" && [ "${#from_env}" -le 18 ]; then
+    from_env=$((10#$from_env))
+    if [ "$from_env" -ge 1 ] && [ "$from_env" -le "$from_cfg" ]; then
+      printf '%s\n' "$from_env"; return 0
+    fi
+  fi
+  die "$1=$from_env — the environment may only shorten watchdog.$2 (${from_cfg}s), never lengthen it"
+}
+STALE=$(threshold FACTORY_STALE stale) || exit 2
+DEAD=$(threshold FACTORY_DEAD dead) || exit 2
+INTERVAL=$(threshold FACTORY_WATCHDOG_INTERVAL interval) || exit 2
+# The config's own invariant, re-asked over the overrides: the validator saw
+# only the file, and a DEAD shortened under an unshortened STALE is a watchdog
+# that revokes before it has warned anybody.
+[ "$DEAD" -gt "$STALE" ] || die "FACTORY_DEAD=$DEAD is not greater than the stale threshold ($STALE)"
 mkdir -p "$FACTORY_STATE_DIR"
 
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  factory watchdog once     # 0 healthy · 3 stalled · 4 live lease, no poller · 1 no lease
+  factory watchdog ensure   # the same check, and start a poller if one is missing
+  factory watchdog run      # poll until the lease ends; revoke a dead foreman's
+  factory watchdog stop
+EOF
+  exit 2
+}
 json=0
 args=()
 for a in "$@"; do
-  case "$a" in --json) json=1 ;; *) args+=("$a") ;; esac
+  case "$a" in
+  --json) json=1 ;;
+  # Refused, not ignored: `once --jsno` answered in prose and exit 0, which a
+  # caller cannot tell from a verb that has no JSON.
+  -*) die "unknown flag '$a' — watchdog takes --json and nothing else" ;;
+  *) args+=("$a") ;;
+  esac
 done
 set -- ${args[@]+"${args[@]}"}
+# Every verb here takes no argument, so a second word is a call this cannot
+# have understood — `stop now` stops the poller no differently from `stop`, and
+# a caller who typed the word meant something by it.
+[ $# -le 1 ] || usage
 
 # The last moment the shift was demonstrably alive: the newest shift log's mtime
 # or the moment the lease was granted, whichever is LATER. Prints nothing and
@@ -362,14 +409,5 @@ stop)
   fi
   rm -f "$PIDFILE"
   ;;
-*)
-  cat >&2 <<'EOF'
-usage:
-  factory watchdog once     # 0 healthy · 3 stalled · 4 live lease, no poller · 1 no lease
-  factory watchdog ensure   # the same check, and start a poller if one is missing
-  factory watchdog run      # poll until the lease ends; revoke a dead foreman's
-  factory watchdog stop
-EOF
-  exit 2
-  ;;
+*) usage ;;
 esac

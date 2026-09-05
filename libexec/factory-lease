@@ -29,7 +29,13 @@ WATCHDOG="$(dirname "$0")/factory-watchdog"
 json=0
 args=()
 for a in "$@"; do
-  case "$a" in --json) json=1 ;; *) args+=("$a") ;; esac
+  case "$a" in
+  --json) json=1 ;;
+  # Refused, not ignored: `status --jsno` answered in prose and exit 0, which
+  # a caller cannot tell from a verb that has no JSON.
+  -*) die "unknown flag '$a' — lease takes --json and nothing else" ;;
+  *) args+=("$a") ;;
+  esac
 done
 set -- ${args[@]+"${args[@]}"}
 
@@ -115,7 +121,7 @@ emit() { # emit <live> <tier> <expires> <granted> <human line>
 now=$(date +%s)
 case "${1:-}" in
 grant)
-  [ -n "${2:-}" ] || usage
+  if [ -z "${2:-}" ] || [ $# -gt 3 ]; then usage; fi
   secs=$(parse_duration "$2")
   tier="${3:-1}"
   [ "$tier" = 1 ] || die "only tier 1 exists — widen tier1.allow instead; a wider grant would be a new tier value here"
@@ -146,10 +152,19 @@ grant)
   # is the same verb the foreman re-runs each wakeup, so there is one
   # implementation of "make sure something is watching".
   if [ "${FACTORY_NO_WATCHDOG:-0}" != 1 ] && [ -x "$WATCHDOG" ]; then
-    "$WATCHDOG" ensure >/dev/null 2>&1 || true
+    # Its report is not this verb's, so stdout goes. Its REFUSAL is: exit 2 is
+    # the watchdog declining its own configuration — an environment override
+    # it may not honour — and a poller that never started is the one thing a
+    # ✓ grant may not be quiet about. The lease stands without it, and the
+    # line says so, until `watchdog once` says NO POLLER.
+    rc=0
+    err=$("$WATCHDOG" ensure 2>&1 >/dev/null) || rc=$?
+    [ "$rc" -ne 2 ] ||
+      out_warn "watchdog did not start — $(oneline "$err") — the lease stands with nothing watching it"
   fi
   ;;
 status)
+  [ $# -eq 1 ] || usage
   if [ ! -s "$LEASE" ]; then emit false 0 0 0 "lease: none"; exit 1; fi
   # The granted stamp is the third field; `_` consumes it where nothing reads it.
   IFS=$'\t' read -r expires tier granted <"$LEASE"
@@ -164,6 +179,7 @@ status)
     "lease: tier $tier · $((left / 60))h $((left % 60))m left · until $(at "$expires")"
   ;;
 revoke)
+  [ $# -eq 1 ] || usage
   rm -f "$LEASE"
   # The watchdog exits on its own the next time it reads a dead lease, but that
   # is up to one poll interval of a poller outliving the thing it watches.

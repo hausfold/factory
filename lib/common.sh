@@ -118,17 +118,70 @@ cfgj() { factory_load; printf '%s' "$FACTORY_CFG" | jq -c "$1"; }
 # Every value the rest of the tool computes on is checked HERE, once, and a bad
 # one is a usage error at startup rather than a pass that half-ran. A policy
 # whose numbers are nonsense must never reach the merge loop and discover it.
+#
+# The SHAPE is checked before the value, because a string where a list goes is
+# the likeliest typo in a JSON file and the one every reader here misreads
+# rather than refuses. jq's `length` of a string is its character count, so
+# `"commands": "make lockfiles"` was fourteen commands on doctor's report and —
+# `.[]?` swallowing the iteration error — none after a merge. A string in
+# `tier1.allow` or `tier1.deny` cannot be iterated either, and there the error
+# is one `factory-tier` dies on: `tier-unknown` for every PR of the night,
+# under a `doctor` that said ready. Checked here, once, for the same reason the
+# numbers are.
+#
+# The two jq programs may not FAIL, only find. `factory-shift` runs without
+# `set -e`, so a validator whose own jq errored would leave `err` empty and the
+# policy passed; each is guarded by `|| die`, and the sections are checked in a
+# program of their own first — reading `.tier1.allow` off a `tier1` that is a
+# string is exactly the error the second program must never reach.
 factory_validate() {
   local err
   err="$(printf '%s' "$FACTORY_CFG" | jq -r '
-    [ (if (.tier1.allow | length) == 0 then "tier1.allow is empty — no PR could ever be tier 1" else empty end),
-      (if (.tier1.authors | length) == 0 then "tier1.authors is empty — write [\"*\"] if you really mean anyone" else empty end),
+    [ ("scope", "tier1", "afterMerge", "budget", "notify", "watchdog") as $k
+      | if (.[$k] | type) != "object" then "\($k) must be an object" else empty end
+    ] | join("; ")')" || die "the policy could not be validated — jq failed reading $FACTORY_CONFIG_PATH"
+  [ -z "$err" ] || die "$err  (in $FACTORY_CONFIG_PATH)"
+  err="$(printf '%s' "$FACTORY_CFG" | jq -r '
+    def list($k): if type != "array" or any(type != "string" or length == 0)
+      then "\($k) must be an array of non-empty strings" else empty end;
+    def path_or_null($k): if (type | IN("string", "null") | not)
+      then "\($k) must be a path or null" else empty end;
+    [ (.scope.orgs | list("scope.orgs")),
+      (.scope.repos | list("scope.repos")),
+      (.scope.exclude | list("scope.exclude")),
+      (.tier1.allow | list("tier1.allow")),
+      (.tier1.deny | list("tier1.deny")),
+      (.tier1.authors | list("tier1.authors")),
+      (.afterMerge.commands | list("afterMerge.commands")),
+      (.afterMerge.workdir | path_or_null("afterMerge.workdir")),
+      (.budget.feed | path_or_null("budget.feed")),
+      # `arrays` first, so an allow that is not one is reported by the shape
+      # check alone: `length` of a boolean is a jq error, and an error here is
+      # the silent pass the header describes.
+      (.tier1.allow | arrays | if length == 0 then "tier1.allow is empty — no PR could ever be tier 1" else empty end),
+      (.tier1.authors | arrays | if length == 0 then "tier1.authors is empty — write [\"*\"] if you really mean anyone" else empty end),
+      # `head` is the one pattern that is a bare string rather than a list, and
+      # a null one arrives at the filter as the regex "null" through `jq -r`.
+      # Empty is refused where `base` refuses it, for a worse reason: ""
+      # matches every branch there is.
+      (if (.tier1.head | type) != "string" or (.tier1.head | length) == 0 then "tier1.head must be a branch pattern — an empty one matches every branch" else empty end),
+      # Compiled here, once, by the engine the filter runs them through. A
+      # pattern jq cannot compile is not a refusal in `factory-tier` but a
+      # death, and a death there is one `tier-unknown` per PR, all night, with
+      # `doctor` green above it. Only the strings are tried; the shape checks
+      # above already own everything else.
+      ([ [.tier1.allow, .tier1.deny, [.tier1.head]][] | arrays | .[] | strings
+         | . as $re | try ("" | test($re) | empty) catch $re ]
+       | if length > 0 then "not a regular expression jq can compile: \(map("\"" + . + "\"") | join(", "))" else empty end),
       (if (.tier1.maxLines | type) != "number" or .tier1.maxLines != (.tier1.maxLines | floor) or .tier1.maxLines < 1 then "tier1.maxLines must be a whole number of lines, 1 or more" else empty end),
       (if (.tier1.requireGreen | IN("if-present","always","never") | not) then "tier1.requireGreen must be if-present, always or never" else empty end),
       (if (.tier1.mergeMethod | IN("squash","merge","rebase") | not) then "tier1.mergeMethod must be squash, merge or rebase" else empty end),
       (if (.tier1.base | type) != "string" or (.tier1.base | length) == 0 then "tier1.base must be a branch name" else empty end),
       (if (.scope.archived | type) != "boolean" then "scope.archived must be true or false" else empty end),
-      (if (.scope.limit | type) != "number" or .scope.limit < 1 then "scope.limit must be a positive number" else empty end),
+      # Whole, because it is handed to `gh repo list --limit` verbatim and read
+      # back with `-lt`: `50.5` is refused by gh mid-walk, as a pass ABORTED
+      # quoting gh at you, rather than here where the policy is read.
+      (if (.scope.limit | type) != "number" or .scope.limit != (.scope.limit | floor) or .scope.limit < 1 then "scope.limit must be a whole number of repos, 1 or more" else empty end),
       (if (.budget.mode | IN("metered","unmetered") | not) then "budget.mode must be metered or unmetered" else empty end),
       (if (.notify.mode | IN("auto","command","off") | not) then "notify.mode must be auto, command or off" else empty end),
       (if (.notify.command | type) != "array" then "notify.command must be an array of argv words, not a string" else empty end),
@@ -160,7 +213,7 @@ factory_validate() {
       # every PR instead, with the nonsense cap printed in the reason.
       ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . != floor or . < 1)) | if length > 0 then "watchdog thresholds must be whole numbers of seconds, 1 or more" else empty end),
       (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end)
-    ] | join("; ")')"
+    ] | join("; ")')" || die "the policy could not be validated — jq failed reading $FACTORY_CONFIG_PATH"
   [ -z "$err" ] || die "$err  (in $FACTORY_CONFIG_PATH)"
 }
 

@@ -8,8 +8,9 @@ sitting overnight because the human who would have merged it was asleep.
 
 `factory` merges the fraction a filter can vouch for, watches the default
 branch's CI, and leaves everything with taste in it for the morning. It is four
-bash scripts, a JSON policy file and a log. There is no daemon, no webhook, no
-service to sign up for, and nothing that phones anywhere.
+bash scripts, a JSON policy file and a log. Nothing stays resident past the
+lease but the poller that watches it, and there is no webhook, no service to
+sign up for, and nothing that phones anywhere.
 
 **Its failure mode is the status quo.** No lease, an expired lease, a pass that
 could not see, a foreman that died — every one of them leaves your PRs exactly
@@ -123,6 +124,16 @@ matched over the combined list. Both keys are on `factory config print`'s scope
 row, beside the count of exclusions your file *writes*, which is not the same
 number as the count that can match.
 
+**Every value is checked when the file is read — by every verb, `doctor`
+included — and the shape before the number.** Each list is an array of
+non-empty strings, and a string where a list goes is refused rather than read
+letter by letter: `"commands": "make lockfiles"` would otherwise be fourteen
+commands on `doctor`'s report and none after a merge. `tier1.head` is a regular
+expression and `tier1.base` a literal branch name. The patterns in `head`,
+`allow` and `deny` have to compile, because one that does not is a night of
+`tier-unknown` under a `doctor` that said ready — and none of them may be
+empty, since `""` matches every path and every branch there is.
+
 **It is machine-local because it is authority.** A copy inside a watched repo
 would be a file a pull request could edit to widen the filter that judges it —
 the same reason the lease is not a checked-in file. It also describes a *fleet*
@@ -138,6 +149,12 @@ filter you reviewed, not by a model's read of the diff. The default is
 deliberately narrow: **a docs-only PR — every changed file matching
 `tier1.allow`, none of it renamed — opened by you from a `worktree-*` branch
 onto `main`, green, conflict-free, and under 2000 changed lines.**
+
+"By you" is `tier1.authors: ["@me"]`, resolved against the `gh` login on the
+machine so the same file works on any of them. Name other logins beside it, or
+write `["*"]` to drop the author test for a repo whose PRs you do not open
+yourself — the widest policy has to be one somebody typed, so an empty list is
+refused rather than read as anyone.
 
 An agent's judgement enters exactly twice, both bounded: writing the PRs in the
 first place, and deciding whether a red CI run is worth a fixer lane. Everything
@@ -194,7 +211,11 @@ build artefact that happens to be markdown.
 `if-present` (the default) forgives a PR that reported no checks, because plenty
 of docs repos run no CI on pull requests at all. Set it to `always` where CI is
 the whole verification story: there, a workflow that failed to *trigger* is
-indistinguishable from one that passed, and `always` refuses to guess.
+indistinguishable from one that passed, and `always` refuses to guess. The
+third value, `never`, does not read the checks at all — a red one included. It
+is the one setting in this file under which a PR a check has refused still
+merges, and it is for a repo whose checks you have decided mean nothing, which
+is a decision worth having made on purpose.
 
 **`always` can require that a check exists, not that a relevant one ran**, and
 that is the distinction to settle before setting it. The rollup it reads is
@@ -451,8 +472,8 @@ saying out loud on a report about whether this machine can run a night.
 ## Development
 
 ```sh
-bats test/                                    # 181 cases
-shellcheck bin/factory libexec/* lib/*.sh
+bats test/                                    # 202 cases
+shellcheck -x bin/factory libexec/* lib/*.sh script/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.
 FACTORY_UI_SH=/path/to/snug/share/ui.sh bats test/

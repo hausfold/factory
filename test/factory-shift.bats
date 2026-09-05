@@ -309,7 +309,75 @@ EOF
 EOF
   run "$SHIFT" --dry-run
   [ "$status" -ne 0 ]
-  [[ "$output" == *"scope.limit must be a positive number"* ]]
+  [[ "$output" == *"scope.limit must be a whole number"* ]]
+}
+
+@test "a fractional scope.limit is refused here, not by gh mid-walk" {
+  # `--limit 50.5` is gh's to refuse, and it does — as a pass ABORTED quoting
+  # gh's usage text, one org into a walk that was policy's to stop.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"], "limit": 50.5 } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"scope.limit must be a whole number"* ]]
+}
+
+# ── ⚠ regression: the shape of a value, not just its number ──────────────────
+# A string where a list goes is the likeliest typo in a JSON file, and every
+# reader here misread it rather than refusing it: jq's `length` of a string is
+# its character count, and `.[]?` swallows the error of iterating one.
+
+@test "⚠ an afterMerge.commands written as a string is refused, not run as nothing" {
+  # `"make lockfiles" | length` is 14, so doctor reported fourteen commands
+  # and marked them ✓; `cfg '.afterMerge.commands[]?'` iterated nothing, so a
+  # pass that merged ran no hook and wrote no after-merge line — silence, on
+  # the night the hook was for.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] },
+  "afterMerge": { "workdir": "$TMP/root", "commands": "./bench pull && ./bench ship" } }
+EOF
+  stub_gh ok green one
+  stub_tier 0
+  grant_lease
+  run "$SHIFT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"afterMerge.commands must be an array of non-empty strings"* ]]
+  [ ! -f "$GH_MERGE_CALLS" ]
+}
+
+@test "a scope.orgs written as a string is refused, not counted letter by letter" {
+  # `"hausfold" | length` is 8: doctor reported eight orgs in scope and said
+  # ready, and the pass then died on "scope names no orgs" — a loud refusal one
+  # verb too late, under a doctor that had just approved the file.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": "hausfold" } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"scope.orgs must be an array of non-empty strings"* ]]
+}
+
+@test "a section written as a string is refused before any field of it is read" {
+  # `.tier1.allow` on a `tier1` that is a string is a jq error, and the
+  # validator's own jq erroring is the one failure it may not have: this script
+  # runs without `set -e`, so an erroring validator left `err` empty and the
+  # policy passed. The sections are checked in a program of their own first.
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "tier1": "docs only" }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"tier1 must be an object"* ]]
+}
+
+@test "a budget.feed that is not a path is refused at load" {
+  cat >"$TMP/config.json" <<EOF
+{ "scope": { "orgs": ["hausfold"] }, "budget": { "feed": ["$TMP/usage.tsv"] } }
+EOF
+  run "$SHIFT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"budget.feed must be a path or null"* ]]
 }
 
 @test "the two scope defaults are still the ones the docs state" {

@@ -37,10 +37,18 @@ that comes from the user's config, always.
   policy may lower; the policy file is machine-local because a copy inside a
   watched repo would be a file a PR could edit to widen the filter judging it.
   Neither is a packaging detail to tidy away.
-- **No environment variable may widen the merge filter.** `FACTORY_CONFIG` and
-  `FACTORY_STATE_DIR` say *where* to read; nothing says *what may merge*. A
+- **No environment variable may widen the merge filter, or lengthen the
+  watchdog's patience.** `FACTORY_CONFIG` and `FACTORY_STATE_DIR` say *where*
+  to read and `FACTORY_UI_SH` how to paint; nothing says *what may merge*. A
   variable that raised the line cap would be authority anything in the shift's
-  environment could grant itself.
+  environment could grant itself. The three the suites use to make a 45-minute
+  threshold reachable in seconds — `FACTORY_STALE`, `FACTORY_DEAD`,
+  `FACTORY_WATCHDOG_INTERVAL` — may only *shorten* the policy's number and are
+  refused when they would not, because a poller inherits the environment of
+  whoever ran `lease grant`, and on a night shift that is the foreman.
+  `FACTORY_NO_WATCHDOG=1` stops `grant` spawning a poller, for a suite that
+  must not leak one; it hides nothing, since `watchdog once` then reports NO
+  POLLER at exit 4 and `doctor` carries that line.
 - **Every deny clause needs a case that fails when it is deleted.** A clause
   that stops matching has no symptom until a PR someone meant to see merges at
   3 a.m. `test/factory-tier.bats` is the shape; the README's floor table and

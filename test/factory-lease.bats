@@ -16,6 +16,8 @@
 # would block the whole run for a poll interval after killing it.
 # `FACTORY_NO_WATCHDOG=1` is set for every case in this file.
 
+bats_require_minimum_version 1.5.0   # `run --separate-stderr`, for the flag refusal
+
 setup() {
   TMP="$BATS_TEST_TMPDIR"
   mkdir -p "$TMP/root/libexec" "$TMP/root/lib"
@@ -71,6 +73,27 @@ expires_in() {
 @test "grant with no duration argument is a usage error" {
   run "$LEASECMD" grant
   [ "$status" -eq 2 ]
+}
+
+@test "an unknown flag is refused on fd 2, not ignored" {
+  # `status --jsno` answered in prose and exit 0 — which a caller cannot tell
+  # from a verb that has no JSON, the swallow every other verb here refuses.
+  lease_expiring 3600
+  run --separate-stderr "$LEASECMD" status --jsno
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"unknown flag '--jsno'"* ]]
+}
+
+@test "status and revoke take no further argument" {
+  lease_expiring 3600
+  run "$LEASECMD" status now
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage:"* ]]
+  run "$LEASECMD" revoke all
+  [ "$status" -eq 2 ]
+  # Refused means not done: the lease is still there.
+  [ -s "$FACTORY_STATE_DIR/lease" ]
 }
 
 # ── parse_duration ───────────────────────────────────────────────────────────
