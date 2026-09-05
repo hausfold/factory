@@ -29,7 +29,10 @@ and the shift log is your handover. Read `factory skill` once first.
    morning instead of a lease that stood all night with nobody exercising it.
    Exit **0** is what you want. **4** is `NO POLLER` — a live lease nothing is
    watching; say so in your start line. **1** means the grant did not take and
-   there is no shift to run.
+   there is no shift to run. **2** is the watchdog refusing its own
+   configuration — the line names it, and it is usually a `FACTORY_*` override
+   in your environment that would lengthen a threshold; unset it and run
+   `factory watchdog ensure`, because until then nothing is watching you.
 4. `factory shift --dry-run` — one sensing pass so your first real pass holds no
    surprises. If it shows `would-merge` rows the user can still see, name them.
 
@@ -61,6 +64,10 @@ Cadence **~20 min**, using whatever timer your client has. Each wakeup:
      `ci-unknown`, check that repo yourself (`gh run list -R <repo> -b main
      -L1`) rather than carrying an unknown through the night. Never spawn a
      fixer off an unknown: you have not seen a failure, only a gap.
+   - **`scope-truncated: <org> listed N repos`** → the org filled `scope.limit`,
+     so anything past the cap was never walked and its PRs were never judged.
+     Not a retry: the next pass lists the same N. Say so in your next message;
+     raising the cap is a policy edit and the user's.
    - **`pass ABORTED`** (non-zero exit) → nothing sensed, nothing merged. Retry
      once; if it aborts again, stop retrying, keep the loop alive at the normal
      cadence, and report it.

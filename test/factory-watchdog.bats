@@ -26,6 +26,8 @@
 # outlive the test that spawned it. The two cases that DO call `grant` are the
 # ones whose subject is that spawn, and they stop it themselves.
 
+bats_require_minimum_version 1.5.0   # `run --separate-stderr`, for the flag refusal
+
 setup() {
   TMP="$BATS_TEST_TMPDIR"
   mkdir -p "$TMP/root/libexec" "$TMP/root/lib" "$TMP/bin"
@@ -523,6 +525,83 @@ EOF
   run "$WD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"factory watchdog once"* ]]
+  run "$WD" once please
+  [ "$status" -eq 2 ]
+}
+
+@test "an unknown flag is refused on fd 2, not ignored" {
+  lease 3600 0
+  run --separate-stderr "$WD" once --jsno
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"unknown flag '--jsno'"* ]]
+}
+
+# ── ⚠ an environment override may shorten a threshold, never lengthen it ─────
+# `FACTORY_STALE`, `FACTORY_DEAD` and `FACTORY_WATCHDOG_INTERVAL` exist so this
+# suite can reach a 45-minute threshold in seconds. A poller inherits the
+# environment of whoever ran `lease grant` — on a night shift, the foreman — so
+# a variable that could LENGTHEN `dead` was a foreman able to keep its lease
+# after it died, and `config print`'s watchdog row was not what was in force.
+
+@test "⚠ an override longer than the policy's threshold is refused, not obeyed" {
+  lease 3600 0
+  log_aged 1
+  FACTORY_DEAD=999999 run "$WD" once
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"may only shorten watchdog.dead (5400s)"* ]]
+  FACTORY_STALE=2701 run "$WD" once
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"may only shorten watchdog.stale"* ]]
+  FACTORY_WATCHDOG_INTERVAL=301 run "$WD" once
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"may only shorten watchdog.interval"* ]]
+}
+
+@test "an override that is not a whole number of seconds is refused too" {
+  lease 3600 0
+  log_aged 1
+  FACTORY_DEAD=5400.5 run "$WD" once
+  [ "$status" -eq 2 ]
+  FACTORY_DEAD=0 run "$WD" once
+  [ "$status" -eq 2 ]
+  # Past 64-bit, the refusal is the whole answer: no `[: integer expression
+  # expected` from a comparison that ran before the length was checked.
+  FACTORY_DEAD=99999999999999999999999 run "$WD" once
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"integer expression"* ]]
+  [[ "$output" == *"may only shorten"* ]]
+}
+
+@test "a grant whose poller refused to start says so, rather than ✓ over nothing" {
+  # `grant` discards `ensure`'s report, and used to discard its refusal with
+  # it: an override the watchdog may not honour left a ✓ lease with no poller
+  # and nothing on screen to say so until `watchdog once`.
+  unset FACTORY_NO_WATCHDOG
+  FACTORY_DEAD=999999 run "$LEASECMD" grant 30m
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"lease: tier 1 until"* ]]
+  [[ "$output" == *"watchdog did not start"* ]]
+  [[ "$output" == *"may only shorten watchdog.dead"* ]]
+  [ ! -s "$FACTORY_STATE_DIR/watchdog.pid" ]
+  "$LEASECMD" revoke >/dev/null
+}
+
+@test "a shortened dead under an unshortened stale is refused — it would revoke before it warned" {
+  lease 3600 0
+  log_aged 1
+  FACTORY_DEAD=60 run "$WD" once
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not greater than the stale threshold (2700)"* ]]
+}
+
+@test "an override equal to the policy's number is the policy's number" {
+  # The boundary, so the check reads `-le` and not `-lt`: a suite that pins
+  # the documented default through the env is not lengthening anything.
+  lease 3600 0
+  log_aged 1
+  FACTORY_DEAD=5400 run "$WD" once
+  [ "$status" -eq 4 ]   # a live lease, no poller — the override was accepted
 }
 
 # The same double-pin the scope and budget defaults carry, one suite over: the

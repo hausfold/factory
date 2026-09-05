@@ -472,7 +472,7 @@ saying out loud on a report about whether this machine can run a night.
 ## Development
 
 ```sh
-bats test/                                    # 192 cases
+bats test/                                    # 202 cases
 shellcheck -x bin/factory libexec/* lib/*.sh script/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

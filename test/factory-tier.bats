@@ -20,6 +20,8 @@
 # `gh` is stubbed; `jq` is real, because the filter IS a jq program and a stub
 # of it would be the thing under test.
 
+bats_require_minimum_version 1.5.0   # `run --separate-stderr`, for the flag refusal
+
 setup() {
   TMP="$BATS_TEST_TMPDIR"
   mkdir -p "$TMP/bin"
@@ -399,6 +401,26 @@ EOF
   run "$TIER" perch
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage:"* ]]
+  run "$TIER" perch 7 extra
+  [ "$status" -eq 2 ]
+}
+
+@test "an unknown flag is refused on fd 2, not read as the repo" {
+  # `--jsno` fell through to the positionals and became the repo name, so the
+  # refusal blamed scope.orgs for a typo in a flag.
+  run --separate-stderr "$TIER" --jsno perch 7
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"unknown flag '--jsno'"* ]]
+}
+
+@test "a PR reference that is not a number is a usage error, not gh's" {
+  # `gh pr view '#7'` is gh's own error at exit 1 — neither 0, 3 nor 2, so
+  # `factory-shift` would file it as tier-unknown rather than as the usage
+  # mistake it is.
+  run "$TIER" perch '#7'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not a pull request number"* ]]
 }
 
 @test "a bare repo name is qualified to the one org in scope, in the verdict too" {

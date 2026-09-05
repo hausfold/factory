@@ -31,20 +31,28 @@ factory_load
 paths_only=0
 json=0
 args=()
+usage() {
+  echo "usage: factory tier [--paths-only] [--json] <repo> <number>" >&2
+  exit 2
+}
 for a in "$@"; do
   case "$a" in
   --paths-only) paths_only=1 ;;
   --json) json=1 ;;
+  # Refused, never carried into the positionals: `--jsno` used to become the
+  # repo name, and the refusal then blamed scope.orgs for it.
+  -*) die "unknown flag '$a' — usage: factory tier [--paths-only] [--json] <repo> <number>" ;;
   *) args+=("$a") ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
 
 repo="${1:-}"; num="${2:-}"
-if [ -z "$repo" ] || [ -z "$num" ]; then
-  echo "usage: factory tier [--paths-only] [--json] <repo> <number>" >&2
-  exit 2
-fi
+if [ -z "$repo" ] || [ -z "$num" ] || [ $# -ne 2 ]; then usage; fi
+# Digits, before anything is asked about it. `gh pr view '#7'` is gh's own
+# error at exit 1 — neither of this verb's answers, so `factory-shift` files
+# it as tier-unknown — and `no()` would hand the bare word to --argjson.
+num "$num" || die "'$num' is not a pull request number"
 # A bare name resolves against the one org in scope. With none or several
 # configured it is ambiguous, and guessing which org a name belongs to is how a
 # verdict gets computed against the wrong repo.
