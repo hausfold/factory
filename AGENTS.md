@@ -21,8 +21,8 @@ that comes from the user's config, always.
 | `libexec/factory-lease` | the standing merge grant |
 | `libexec/factory-tier` | one PR's verdict. **The filter is the definition of tier 1** |
 | `libexec/factory-shift` | one pass. Deterministic: no judgement lives here |
-| `libexec/factory-watchdog` | notices the foreman died |
-| `ai/SKILL.md`, `ai/nightshift/SKILL.md` | the agent surface — verbs, and the loop that drives them |
+| `libexec/factory-watchdog` | the runner. Passes `factory shift` every `runner.interval` while the lease is live, puts every `ci-red` through the four fixer gates, revokes a lease whose passes stopped landing |
+| `ai/SKILL.md` | the agent surface — the verbs. There is no loop skill any more: the loop is the runner |
 
 ## Rules
 
@@ -43,12 +43,20 @@ that comes from the user's config, always.
   variable that raised the line cap would be authority anything in the shift's
   environment could grant itself. The three the suites use to make a 45-minute
   threshold reachable in seconds — `FACTORY_STALE`, `FACTORY_DEAD`,
-  `FACTORY_WATCHDOG_INTERVAL` — may only *shorten* the policy's number and are
-  refused when they would not, because a poller inherits the environment of
-  whoever ran `lease grant`, and on a night shift that is the foreman.
-  `FACTORY_NO_WATCHDOG=1` stops `grant` spawning a poller, for a suite that
-  must not leak one; it hides nothing, since `watchdog once` then reports NO
-  POLLER at exit 4 and `doctor` carries that line.
+  `FACTORY_WATCHDOG_INTERVAL`, and `FACTORY_RUNNER_INTERVAL` for the pass
+  cadence — may only *shorten* the policy's number and are refused when they
+  would not, because the runner inherits the environment of whoever ran
+  `lease grant`. `FACTORY_NO_WATCHDOG=1` stops `grant` spawning a runner, for
+  a suite that must not leak one; it hides nothing, since `watchdog once` then
+  reports NO RUNNER at exit 4 and `doctor` carries that line.
+- **The fixer gates are four, in code, and each refusal is a line.** A `ci-red`
+  event gets a lane only when `fixer.command` is configured, no shift log holds
+  a `fixer-spawned` for the same head SHA, today's log holds fewer than
+  `fixer.cap` for the repo, and the pass's `budget` event said `fixer: true`.
+  Every other outcome is `fixer-skipped` with the gate named, or
+  `fixer-failed` with the command's stderr. These were a skill's prose once,
+  which is a threshold no test can reach; `test/factory-watchdog.bats` has a
+  case per gate, written so that deleting the gate fails it.
 - **Every deny clause needs a case that fails when it is deleted.** A clause
   that stops matching has no symptom until a PR someone meant to see merges at
   3 a.m. `test/factory-tier.bats` is the shape; the README's floor table and

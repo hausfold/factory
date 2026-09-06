@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # factory-lease — the standing merge grant the shift runs under.
 #
-#   factory lease grant 12h     # tier-1 authority for 12 hours
-#   factory lease status        # exit 0 live · 1 none/expired
+#   factory lease grant 12h            # tier-1 authority for 12 hours
+#   factory lease grant indefinitely   # the same, until revoked
+#   factory lease status               # exit 0 live · 1 none/expired
 #   factory lease revoke
 #
-# A lease is (tier ceiling, expiry). While one is live, `factory shift` may
+# A lease is (tier ceiling, expiry). While one is live, the runner `grant`
+# starts (`factory watchdog run`) passes `factory shift` on a cadence and may
 # MERGE tier-1 PRs on its own; expired or revoked, everything queues at "PR
 # open" — i.e. the failure mode of the whole factory is the ordinary
 # human-in-the-loop workflow. Only tier 1 exists today; the column is there so
@@ -14,6 +16,14 @@
 # State is one TSV line — <expires epoch>\t<tier>\t<granted epoch> — under the
 # state dir, machine-local on purpose: authority to merge unattended belongs to
 # this machine's owner having typed `grant`, never to a file a PR could edit.
+#
+# An INDEFINITE lease writes the word `never` where the epoch goes. A word and
+# not a number on purpose: every reader that only knows epochs — this file's
+# own `status` before it learned the word, a tool reading the file directly —
+# fails `num` on it and reports the lease unreadable, which is exit 1 and "may
+# not merge". A sentinel epoch (0, or 2^62) would read as expired in one reader
+# and as live for a century in another. The bound on an indefinite lease is
+# tier 1 itself, which is why it is allowed at all.
 # Every jq program in this file is single-quoted on purpose: `$d`, `$repo` and
 # the rest are jq's OWN variables, bound by --arg/--argjson, and expanding them
 # in the shell first is exactly the bug the quoting prevents.
@@ -43,6 +53,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   factory lease grant <duration>   # 30m / 12h / 2d — tier-1 authority until then
+  factory lease grant indefinitely # tier-1 authority until `revoke`
   factory lease status [--json]    # exit 0 live · 1 none/expired
   factory lease revoke
 EOF
@@ -102,12 +113,20 @@ parse_duration() { # 30m / 12h / 2d → seconds
   echo "$secs"
 }
 
-emit() { # emit <live> <tier> <expires> <granted> <human line>
+# `expires` is an epoch, or `never` for an indefinite lease. In the JSON that
+# is `expires: null`, `secondsLeft: null` and `indefinite: true` — null rather
+# than a large number, because a caller drawing a countdown off `secondsLeft`
+# should draw "until revoked" and not "1,051 years".
+emit() { # emit <live> <tier> <expires|never> <granted> <human line>
   if [ "$json" = 1 ]; then
-    jq -nc --argjson live "$1" --argjson tier "$2" --argjson expires "$3" \
-      --argjson granted "$4" --arg line "$5" \
-      '{live: $live, tier: $tier, expires: $expires, granted: $granted,
-        secondsLeft: (if $live then ($expires - (now | floor)) else 0 end), line: $line}'
+    local expires="$3" indefinite=false
+    if [ "$3" = never ]; then expires=null; indefinite=true; fi
+    jq -nc --argjson live "$1" --argjson tier "$2" --argjson expires "$expires" \
+      --argjson granted "$4" --argjson indefinite "$indefinite" --arg line "$5" \
+      '{live: $live, tier: $tier, expires: $expires, granted: $granted, indefinite: $indefinite,
+        secondsLeft: (if $live and $indefinite then null
+                      elif $live then ($expires - (now | floor)) else 0 end),
+        line: $line}'
   elif [ "$1" = true ]; then
     out_ok "$5"
   else
@@ -122,45 +141,51 @@ now=$(date +%s)
 case "${1:-}" in
 grant)
   if [ -z "${2:-}" ] || [ $# -gt 3 ]; then usage; fi
-  secs=$(parse_duration "$2")
   tier="${3:-1}"
   [ "$tier" = 1 ] || die "only tier 1 exists — widen tier1.allow instead; a wider grant would be a new tier value here"
-  # The EXPIRY is what gets written, so it is checked here, where the clock it
-  # is added to is in scope. Both ways of not being one are the same failure to
-  # whoever reads the line: `now + secs` past 2^63 wraps negative, and `status`
-  # then calls the state file this verb has just written unreadable; an expiry
-  # `date` will not format leaves the ✓ ending on a bare "until", because `at`
-  # answers with nothing. A duration can clear parse_duration and still land
-  # on either — 106751991167300d multiplies without wrapping.
-  expires=$((now + secs))
-  # `|| when=""` because a `date` that refuses the stamp exits non-zero, and
-  # under `set -e` that status inside a command substitution ends the script
-  # before the check below can turn it into a sentence. The empty answer IS
-  # the signal here, so it is caught rather than propagated.
-  when=$(at "$expires") || when=""
-  if [ "$expires" -le "$now" ] || [ -z "$when" ]; then
-    die "duration '$2' puts the expiry past what this machine can represent"
+  if [ "$2" = indefinitely ]; then
+    expires=never
+    line="lease: tier $tier indefinitely — until revoked"
+  else
+    secs=$(parse_duration "$2")
+    # The EXPIRY is what gets written, so it is checked here, where the clock
+    # it is added to is in scope. Both ways of not being one are the same
+    # failure to whoever reads the line: `now + secs` past 2^63 wraps negative,
+    # and `status` then calls the state file this verb has just written
+    # unreadable; an expiry `date` will not format leaves the ✓ ending on a
+    # bare "until", because `at` answers with nothing. A duration can clear
+    # parse_duration and still land on either — 106751991167300d multiplies
+    # without wrapping.
+    expires=$((now + secs))
+    # `|| when=""` because a `date` that refuses the stamp exits non-zero, and
+    # under `set -e` that status inside a command substitution ends the script
+    # before the check below can turn it into a sentence. The empty answer IS
+    # the signal here, so it is caught rather than propagated.
+    when=$(at "$expires") || when=""
+    if [ "$expires" -le "$now" ] || [ -z "$when" ]; then
+      die "duration '$2' puts the expiry past what this machine can represent"
+    fi
+    line="lease: tier $tier until $when"
   fi
   mkdir -p "$FACTORY_STATE_DIR"
   printf '%s\t%s\t%s\n' "$expires" "$tier" "$now" >"$LEASE"
-  emit true "$tier" "$expires" "$now" "lease: tier $tier until $when"
-  # A live lease always has a watchdog, and it is started HERE rather than by
-  # the foreman so the invariant is structural: the one thing that must not
-  # depend on the agent still working is the thing that notices it stopped.
-  # `ensure` is idempotent (one pidfile per machine, claimed by hardlink), so a
-  # second grant inside a live shift extends the lease without racing — and it
-  # is the same verb the foreman re-runs each wakeup, so there is one
-  # implementation of "make sure something is watching".
+  emit true "$tier" "$expires" "$now" "$line"
+  # A live lease always has a runner, and it is started HERE so the invariant
+  # is structural: the lease is the on/off switch, and nothing else has to be
+  # remembered. `ensure` is idempotent (one pidfile per machine, claimed by
+  # hardlink), so a second grant inside a live shift extends the lease without
+  # starting a second runner — and on a machine whose launchd keeps the runner
+  # alive, `ensure` finds it already running and does nothing.
   if [ "${FACTORY_NO_WATCHDOG:-0}" != 1 ] && [ -x "$WATCHDOG" ]; then
     # Its report is not this verb's, so stdout goes. Its REFUSAL is: exit 2 is
-    # the watchdog declining its own configuration — an environment override
-    # it may not honour — and a poller that never started is the one thing a
-    # ✓ grant may not be quiet about. The lease stands without it, and the
-    # line says so, until `watchdog once` says NO POLLER.
+    # the runner declining its own configuration — an environment override it
+    # may not honour — and a runner that never started is the one thing a ✓
+    # grant may not be quiet about. The lease stands without it, and the line
+    # says so, until `watchdog once` says NO RUNNER.
     rc=0
     err=$("$WATCHDOG" ensure 2>&1 >/dev/null) || rc=$?
     [ "$rc" -ne 2 ] ||
-      out_warn "watchdog did not start — $(oneline "$err") — the lease stands with nothing watching it"
+      out_warn "runner did not start — $(oneline "$err") — the lease stands and no pass will run under it"
   fi
   ;;
 status)
@@ -168,9 +193,15 @@ status)
   if [ ! -s "$LEASE" ]; then emit false 0 0 0 "lease: none"; exit 1; fi
   # The granted stamp is the third field; `_` consumes it where nothing reads it.
   IFS=$'\t' read -r expires tier granted <"$LEASE"
-  num "${expires:-}" || { emit false 0 0 0 "lease: unreadable"; exit 1; }
+  if [ "${expires:-}" != never ] && ! num "${expires:-}"; then
+    emit false 0 0 0 "lease: unreadable"; exit 1
+  fi
   num "${granted:-}" || granted=0
   num "${tier:-}" || tier=0
+  if [ "$expires" = never ]; then
+    emit true "$tier" never "$granted" "lease: tier $tier · indefinite · until revoked"
+    exit 0
+  fi
   if [ "$now" -ge "$expires" ]; then
     emit false "$tier" "$expires" "$granted" "lease: expired $(at "$expires")"; exit 1
   fi
@@ -181,9 +212,11 @@ status)
 revoke)
   [ $# -eq 1 ] || usage
   rm -f "$LEASE"
-  # The watchdog exits on its own the next time it reads a dead lease, but that
-  # is up to one poll interval of a poller outliving the thing it watches.
-  # Stopping it here keeps "no lease" and "nothing running" the same moment.
+  # The runner exits on its own the next time it reads a dead lease, but that
+  # is up to one tick of a runner outliving its authority — and a pass it had
+  # already started finishes under `factory shift`'s own lease check, which
+  # now says no. Stopping it here keeps "no lease" and "nothing running" the
+  # same moment.
   if [ -x "$WATCHDOG" ]; then "$WATCHDOG" stop >/dev/null 2>&1 || true; fi
   emit false 0 0 0 "lease: revoked"
   ;;

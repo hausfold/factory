@@ -8,15 +8,16 @@
 #
 # One pass does four things, in order:
 #   budget   read the configured usage feed and answer the one question the
-#            foreman asks of it: can the account afford an agent lane right
+#            runner asks of it: can the account afford an agent lane right
 #            now? The line ends `fixer: yes` or `fixer: no (<why>)`, and the
-#            foreman spawns on nothing else.
+#            runner (`factory watchdog run`) spawns on nothing else.
 #   merge    every open PR in scope through factory-tier; tier 1 + live lease
 #            → `gh pr merge`. Anything else is printed with its reason and
 #            left for the morning.
 #   after    if anything merged: the configured afterMerge commands, in order.
 #   ci       the latest completed run on each repo's default-branch, red → a
-#            CI-RED line (the foreman's cue) and a fault card.
+#            CI-RED line (the runner's cue to consider a fixer lane) and a
+#            fault card.
 #
 # Four lines say the pass could not SEE, and none of them means "nothing to
 # report": `prs-unknown` (a repo's open PRs unlistable), `tier-unknown` (one PR
@@ -76,7 +77,7 @@ say() { # say <json-or-empty> <human line> [ok|warn|err|url|muted]
     err)  out_bad     "$2" ;;
     # A line whose payload is a URL. Same mark as `err`, no folding: the run URL
     # is one unbreakable token and a narrow window would otherwise cut it in
-    # half, which costs the foreman the only thing that line is carrying.
+    # half, which costs the reader the only thing that line is carrying.
     url)  out_bad_url "$2" ;;
     *)    out_info    "$2" ;;
     esac
@@ -105,9 +106,10 @@ say "$(J --arg d "$(factory_policy_digest)" --arg v "$FACTORY_VERSION" \
 # because a threshold written out in English, in another file, over numbers only
 # this one can see, is a threshold no test can reach — and its refusal is the
 # same word as a correct refusal, so a gate stuck shut looks exactly like a gate
-# doing its job. What stays the foreman's is whether a red main is WORTH a lane;
-# whether the account can afford one is answered here, once, and logged where
-# the morning reads it.
+# doing its job. The runner reads the verdict off the `budget` event's `fixer`
+# and `reason` fields and applies its other three gates on top; whether the
+# account can afford a lane is answered here, once, and logged where the
+# morning reads it.
 #
 # The question is forward-looking on purpose. "Is the week spent no faster than
 # the clock so far" is a question nobody has, and it cannot be answered yes by
@@ -189,16 +191,21 @@ else
       headroom=$((CEILING - pw - reserve))
       # 5h first, and it is not about the week at all: a factory that saturates
       # the rolling window at 4 a.m. rate-limits the person who sits down at 9.
+      #
+      # The reason is its own field in the event, not only the tail of the
+      # human line: the runner quotes it on its `fixer-skipped: … budget — …`
+      # line, and one verb never parses another's human line.
+      budget_why=""
       if [ "$p5" -ge "$MAX5H" ]; then
-        budget_verdict="no (5h window at ${p5}%)"
+        budget_why="5h window at ${p5}%"
       elif [ "$headroom" -lt "$FIXER" ]; then
-        budget_verdict="no (headroom ${headroom} pts, one fixer needs ${FIXER})"
-      else
-        budget_verdict=yes
+        budget_why="headroom ${headroom} pts, one fixer needs ${FIXER}"
       fi
+      if [ -n "$budget_why" ]; then budget_verdict="no ($budget_why)"; else budget_verdict=yes; fi
       say "$(J --argjson p5 "$p5" --argjson pw "$pw" --argjson r "$reserve" --argjson h "$headroom" \
-        --argjson ok "$([ "$budget_verdict" = yes ] && echo true || echo false)" \
-        '{event:"budget", mode:"metered", window5h:$p5, week:$pw, reserve:$r, headroom:$h, fixer:$ok}')" \
+        --argjson ok "$([ "$budget_verdict" = yes ] && echo true || echo false)" --arg why "$budget_why" \
+        '{event:"budget", mode:"metered", window5h:$p5, week:$pw, reserve:$r, headroom:$h, fixer:$ok,
+          reason:(if $ok then null else $why end)}')" \
         "budget: 5h ${p5}% · week ${pw}% · reserve ${reserve} pts · headroom ${headroom} pts · fixer: $budget_verdict"
     fi
   fi
@@ -225,7 +232,7 @@ fi
 # merged" — character-for-character what a genuinely quiet night prints. Same
 # rule the budget block states about itself: degrade to a stated unknown, never
 # to an answer that happens to parse. A pass that sensed nothing exits non-zero
-# so the foreman cannot read it as a clean one.
+# so the runner cannot read it as a clean one.
 abort() { # abort <reason>
   say "$(J --arg r "$1" '{event:"aborted", reason:$r}')" "pass ABORTED: $1" err
   # This one DOES card, where ci-unknown does not, and the asymmetry is blast
@@ -295,7 +302,7 @@ for repo in $repos; do
       # and anything else is `set -e` aborting inside it — most often on a `gh`
       # call. Those are three answers, not two. "Refused" and "could not be
       # judged" collapsing into one `queued:` line is the expensive one: a
-      # foreman is told that queued rows need nothing because they are the
+      # skill says that queued rows need nothing because they are the
       # morning's by design, so a PR nobody managed to sense gets filed as one
       # nobody needs to look at.
       #  Asked for JSON, and that is not a style choice. One verb parsing
@@ -367,13 +374,20 @@ for repo in $repos; do
   # 404 rather than returning an empty list, so that repo would be `ci-unknown`
   # on every pass forever. If one is, the answer is `scope.exclude` or an arm
   # that recognises the 404, never a wider `||`.
+  #
+  # The head SHA and the branch ride in the event beside the URL, for the
+  # runner's fixer gates: `head` is what "never a second lane for the same
+  # failure" is counted on, and `branch` is what the lane is handed. Both are
+  # facts this pass already had — the query is `-b "$base"`, so every red
+  # reported here is on the default branch by construction, and that is the
+  # fourth gate answered before the runner asks it.
   if run_row=$(gh run list -R "$repo" -b "$base" -L1 \
-    --json conclusion,url -q '.[] | [.conclusion, .url] | @tsv' 2>"$ERRF"); then
-    read -r conclusion url <<<"$run_row"
+    --json conclusion,url,headSha -q '.[] | [.conclusion, .url, .headSha] | @tsv' 2>"$ERRF"); then
+    read -r conclusion url run_head <<<"$run_row"
     case "${conclusion:-}" in
     failure | timed_out | startup_failure)
-      say "$(J --arg r "$repo" --arg u "$url" --arg c "$conclusion" \
-        '{event:"ci-red", repo:$r, url:$u, conclusion:$c}')" "CI-RED: $repo $url" url
+      say "$(J --arg r "$repo" --arg u "$url" --arg c "$conclusion" --arg h "${run_head:-}" --arg b "$base" \
+        '{event:"ci-red", repo:$r, url:$u, conclusion:$c, head:$h, branch:$b}')" "CI-RED: $repo $url" url
       notify fault "CI red on $repo $base" "$url"
       ;;
     esac
@@ -382,7 +396,7 @@ for repo in $repos; do
       '{event:"ci-unknown", repo:$r, stderr:$e}')" \
       "ci-unknown: $repo — $base's latest run not read: $(oneline "$(cat "$ERRF")")" warn
   fi
-  conclusion=""; url=""
+  conclusion=""; url=""; run_head=""
 done
 
 # ── after merge ───────────────────────────────────────────────────────────────
