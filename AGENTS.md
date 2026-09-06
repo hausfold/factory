@@ -1,108 +1,64 @@
 # AGENTS.md
 
-**factory** — merge the pull requests code alone can vouch for, while nobody is
-watching. Four bash scripts, one machine-local JSON policy, one log. This file
-is for an agent working **on** factory, from a checkout; `ai/SKILL.md` is for an
-agent **using** it on a machine that has no checkout. They are different
-documents and neither substitutes for the other.
+**factory** merges the pull requests code alone can vouch for: four bash
+scripts, a machine-local JSON policy, a log. **`README.md` is the manual.**
 
-Standalone and repo-agnostic on purpose. The hausfold layer ships it on `PATH`,
-but nothing here may assume hausfold: no `bench`, no `haus`, no org name, no
-workshop layout. The org this repo lives in is not the org the tool watches —
-that comes from the user's config, always.
+Standalone: never assume hausfold (`bench`, `haus`, an org name); the org it
+watches comes from config.
 
 ## The shape
 
 | | |
 |---|---|
-| `bin/factory` | the dispatcher, plus `config`, `doctor` and `skill`. Execs the libexec scripts; holds no policy of its own |
-| `lib/common.sh` | config load + validation, the deny **floor**, the BSD/GNU `stat`/`date` shims, `notify`. Sourced, never executed |
-| `lib/ui.sh` | how a line reaches the screen: `out_ok`/`out_warn`/`out_bad`/`out_info` on fd 1, `fail`/`hint`/`die` on fd 2, and snug's painter behind them. Separate from `common.sh` because `factory --help` must draw without `jq` |
-| `libexec/factory-lease` | the standing merge grant |
+| `bin/factory` | dispatcher, plus `config`, `doctor`, `skill`. Holds no policy |
+| `lib/common.sh` | config + validation, the deny floor, `stat`/`date` shims, `notify`. Sourced, never executed |
+| `lib/ui.sh` | `out_ok`/`out_warn`/`out_bad`/`out_info` on fd 1, `fail`/`hint`/`die` on fd 2. Separate so `factory --help` draws without `jq` |
+| `libexec/factory-lease` | the merge grant. Live (`lease status`), tier 1 merges; nothing else does |
 | `libexec/factory-tier` | one PR's verdict. **The filter is the definition of tier 1** |
-| `libexec/factory-shift` | one pass. Deterministic: no judgement lives here |
-| `libexec/factory-watchdog` | the runner. Passes `factory shift` every `runner.interval` while the lease is live, puts every `ci-red` through the four fixer gates, revokes a lease whose passes stopped landing |
-| `ai/SKILL.md` | the agent surface — the verbs. There is no loop skill any more: the loop is the runner |
+| `libexec/factory-shift` | one pass, deterministic |
+| `libexec/factory-watchdog` | the runner: `factory shift` every `runner.interval` under a live lease, each `ci-red` through the four fixer gates, revokes when passes stop landing |
+| `ai/SKILL.md` | the agent surface: the verbs. The loop is the runner |
 
 ## Rules
 
-- **Silence is a claim.** Every step that could fail to *see* degrades to a
-  named line — `prs-unknown`, `tier-unknown`, `ci-unknown`, `pass ABORTED` —
-  never to an answer that happens to parse, and never to nothing. A pass that
-  looked at nothing must not print what a quiet night prints. This is the one
-  invariant the whole design rests on; a change that adds a silent failure path
-  is wrong however small.
-- **The floor is not configurable, and the config is not in a repo.** Both are
-  authority questions. `FACTORY_FLOOR_DENY` in `lib/common.sh` is what no
-  policy may lower; the policy file is machine-local because a copy inside a
-  watched repo would be a file a PR could edit to widen the filter judging it.
-  Neither is a packaging detail to tidy away.
-- **No environment variable may widen the merge filter, or lengthen the
-  watchdog's patience.** `FACTORY_CONFIG` and `FACTORY_STATE_DIR` say *where*
-  to read and `FACTORY_UI_SH` how to paint; nothing says *what may merge*. A
-  variable that raised the line cap would be authority anything in the shift's
-  environment could grant itself. The three the suites use to make a 45-minute
-  threshold reachable in seconds — `FACTORY_STALE`, `FACTORY_DEAD`,
-  `FACTORY_WATCHDOG_INTERVAL`, and `FACTORY_RUNNER_INTERVAL` for the pass
-  cadence — may only *shorten* the policy's number and are refused when they
-  would not, because the runner inherits the environment of whoever ran
-  `lease grant`. `FACTORY_NO_WATCHDOG=1` stops `grant` spawning a runner, for
-  a suite that must not leak one; it hides nothing, since `watchdog once` then
-  reports NO RUNNER at exit 4 and `doctor` carries that line.
-- **The fixer gates are four, in code, and each refusal is a line.** A `ci-red`
-  event gets a lane only when `fixer.command` is configured, no shift log holds
-  a `fixer-spawned` for the same head SHA, today's log holds fewer than
-  `fixer.cap` for the repo, and the pass's `budget` event said `fixer: true`.
-  Every other outcome is `fixer-skipped` with the gate named, or
-  `fixer-failed` with the command's stderr. These were a skill's prose once,
-  which is a threshold no test can reach; `test/factory-watchdog.bats` has a
-  case per gate, written so that deleting the gate fails it.
-- **Every deny clause needs a case that fails when it is deleted.** A clause
-  that stops matching has no symptom until a PR someone meant to see merges at
-  3 a.m. `test/factory-tier.bats` is the shape; the README's floor table and
-  that suite are read against each other, so an exclusion added to one needs a
-  row in the other in the same edit.
-- **A number the README states is a number a test pins on both sides.** The
-  budget dials live in `factory_defaults`; a pin that only greps the code is
-  re-blessed by the same edit that breaks the doc.
-- **`bash`, `jq`, `gh` and nothing else *required*.** No Go rewrite without a
-  reason the bash cannot meet. It has to install with a `git clone` and a
-  symlink on a machine with no Nix — which is why snug is an input and not a
-  dependency: `lib/ui.sh` sources `$FACTORY_UI_SH` **if it is readable** and
-  degrades to plain marked text if it is not. The Nix wrapper sets that
-  variable at snug's store path; a cloned checkout has no wrapper, and prints
-  the same report unpainted. A change that makes any verb *need* snug has
-  broken the clone-and-symlink install.
-- **A report draws on fd 1; only an error draws on fd 2.** `doctor`'s checklist,
-  `tier`'s verdict, `lease status` and every line of a `shift` are what the user
-  ran the command for, so `factory shift >> nightly.log` has to come out whole —
-  and escape-free, which it does because snug gates and measures each stream
-  about its own far end. `fail`, `hint` and `die` are the fd-2 half. The
-  standard is `hausfold/snug`'s README and AGENTS.md; `test/presentation.bats`
-  is what holds factory to it, including a blanket ban on a literal escape
-  anywhere in `bin/`, `libexec/` or `lib/`.
-- **A flag a verb does not implement is refused, never ignored.** `doctor
-  --json` printed the human checklist and exited 0 for as long as `cmd_doctor`
-  never looked at `$@`, and an agent handed prose back cannot tell "this verb
-  has no JSON" from "the JSON is malformed". Every verb parses its own flags and
-  dies on one it does not know — on fd 2, with nothing on fd 1. A flag it DOES
-  know, handed no value or an empty one, is the same refusal: `shift 2` past the
-  end of `$@` returns 1 and `set -e` turns that into an exit with nothing on
-  either stream, and an empty value is an unset shell variable rather than a
-  request — falling through to a default there acts on a request nobody made.
-  `test/agent-surface.bats` is what holds the dispatcher to that, and a new flag
-  belongs in the same edit as the case that proves the old ones still refuse.
-- **One verb never parses another's human line.** `shift` asks `tier` and
-  `lease` for `--json` and reads fields out of it. The human line carries a mark
-  in its gutter and is folded to the window; both are presentation, and both
-  have already broken a caller that treated the line as a contract.
-- **Portable between BSD and GNU.** The Mac holds the lease and the CI runner is
-  Ubuntu. `stat` and `date` are probed once in `lib/common.sh` — never
-  `bsd_form || gnu_form`, which appends the right answer to the wrong one.
-- Verify with `bats test/` and `shellcheck -x bin/factory libexec/* lib/*.sh
-  script/*.sh`. Both are what CI runs.
+- **Silence is a claim.** A step that could fail to see prints a named line,
+  `prs-unknown`, `tier-unknown`, `ci-unknown`, `pass ABORTED`, never nothing.
+- **`FACTORY_FLOOR_DENY` (`lib/common.sh`) is not configurable, and the policy
+  is machine-local**: `factory config print` is its only statement.
+- **No environment variable may widen the filter or lengthen the watchdog's
+  patience.** `FACTORY_CONFIG`, `FACTORY_STATE_DIR` say where; `FACTORY_UI_SH`
+  how to paint; `FACTORY_STALE`, `FACTORY_DEAD`, `FACTORY_WATCHDOG_INTERVAL`,
+  `FACTORY_RUNNER_INTERVAL` only shorten, refused otherwise.
+  `FACTORY_NO_WATCHDOG=1` stops `lease grant` spawning a runner; `watchdog once`
+  then reports NO RUNNER, exit 4.
+- **Four fixer gates, in code, each refusal a line.** A `ci-red` gets a
+  lane only if `fixer.command` is set, no shift log holds `fixer-spawned` for
+  its head SHA, today's holds fewer than `fixer.cap` for the repo, and the
+  pass's `budget` event said `fixer: true`; else `fixer-skipped` naming the
+  gate, or `fixer-failed` with stderr. `test/factory-watchdog.bats`: a case
+  per gate.
+- **Every deny clause needs a case that fails when it is deleted**:
+  `test/factory-tier.bats`, edited with the README's floor table.
+- **A number the README states, a test pins on both sides.** Dials:
+  `factory_defaults`.
+- **`bash`, `jq`, `gh`, nothing else**: it installs by `git clone` and a
+  symlink. `lib/ui.sh` sources `$FACTORY_UI_SH` (snug's `share/ui.sh`, from
+  the Nix wrapper) only if readable, else prints plain marks; no verb may need
+  snug.
+- **A report draws on fd 1, an error on fd 2**, so
+  `factory shift >> nightly.log` is whole and escape-free. `hausfold/snug`'s
+  README and AGENTS.md are the standard; `test/presentation.bats` holds it and
+  bans literal escapes in `bin/`, `libexec/`, `lib/`.
+- **An unknown flag, or a known one with no or an empty value, is refused,
+  never ignored**: fd 2, nothing on fd 1. `test/agent-surface.bats`; a new flag
+  lands with its case.
+- **One verb never parses another's human line.** `shift` reads `tier` and
+  `lease` through `--json`.
+- **BSD and GNU.** `stat` and `date` are probed once in `lib/common.sh`, never
+  `bsd_form || gnu_form`.
+- Verify: `bats test/` and `shellcheck -x bin/factory libexec/* lib/*.sh
+  script/*.sh`, what CI runs.
 
 ## Releasing
 
-CalVer, cut from `main`. `VERSION` is read by `flake.nix` to name the
-derivation; a tag is what publishes.
+CalVer from `main`. `flake.nix` reads `VERSION`; a tag publishes.
