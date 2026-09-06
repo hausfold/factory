@@ -5,7 +5,8 @@
 #   lease      the standing merge grant this machine's owner types
 #   tier       is one PR mergeable unattended, by policy rather than judgement
 #   shift      one pass: sense, merge tier 1, report the rest
-#   watchdog   notice that the foreman died, which no pass can report
+#   watchdog   the runner: pass on a cadence while the lease is live, spawn the
+#              fixer lanes the gates let through, notice when passes stop
 #
 # Everything else here is the surface around them: `config`, `doctor`, `skill`.
 # shellcheck source-path=SCRIPTDIR/..
@@ -25,15 +26,16 @@ usage() {
 factory — merge the PRs code alone can vouch for, while nobody is watching.
 
 usage:
-  factory lease grant <30m|12h|2d>    take tier-1 merge authority until then
+  factory lease grant <30m|12h|2d>    take tier-1 merge authority until then;
+  factory lease grant indefinitely      the runner passes under it until it ends
   factory lease status [--json]       0 live · 1 none/expired
   factory lease revoke
 
   factory shift [--dry-run] [--json]  one pass: sense, merge, report
   factory tier <repo> <n> [--json]    is one PR tier 1?  0 yes · 3 no
 
-  factory watchdog once|ensure [--json]   is the foreman alive?
-  factory watchdog run|stop               the poller itself
+  factory watchdog once|ensure [--json]   are passes landing under the lease?
+  factory watchdog run|stop               the runner itself
 
   factory config print [--json]       the EFFECTIVE policy, defaults included
   factory config path                 where that file is read from
@@ -46,9 +48,9 @@ usage:
   factory --help · --version
 
 exit codes
-  0  ok / tier 1 / healthy       3  refused (not tier 1) · stalled foreman ·
+  0  ok / tier 1 / alive         3  refused (not tier 1) · stalled shift ·
   1  nothing (no lease) · pass      a skill install only partly honoured
-     aborted                     4  live lease with no poller watching it
+     aborted                     4  live lease with no runner under it
   2  usage, or a config that
      cannot be used
 
@@ -270,7 +272,9 @@ cmd_config() {
             "budget\t\(.budget.mode), feed \(.budget.feed // "-"), ceiling \(.budget.ceiling) reserve \(.budget.reserve) fixer \(.budget.fixer) 5h-max \(.budget.window5hMax)",
             "after\t\(.afterMerge.commands | length) command(s) in \(.afterMerge.workdir // "the current directory")",
             "notify\t\(.notify.mode), source \(.notify.source), command \(if (.notify.command | length) == 0 then "-" else (.notify.command | join(" ")) end)",
-            "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s"'
+            "watchdog\tstale \(.watchdog.stale)s dead \(.watchdog.dead)s interval \(.watchdog.interval)s",
+            "runner\ta pass every \(.runner.interval)s while the lease is live",
+            "fixer\tcommand \(if (.fixer.command | length) == 0 then "-" else (.fixer.command | join(" ")) end), cap \(.fixer.cap) per repo per day"'
       )"
       while IFS=$'\t' read -r k v; do ui_trow "$k" "$v"; done <<<"$rows"
       ui_table_data
@@ -394,7 +398,7 @@ cmd_doctor() {
 
   # Whether anything will actually REACH you is a readiness question, the same
   # shape as the budget feed above: a shift that merges correctly and cards
-  # nowhere is a shift whose red CI and dead foreman go unread until morning.
+  # nowhere is a shift whose red CI and stalled passes go unread until morning.
   # Nothing here blocks a merge, but a `command` the user typed and PATH cannot
   # find is a configured thing that cannot work — `afterMerge.workdir`'s
   # footing, so `afterMerge.workdir`'s severity.
@@ -402,7 +406,7 @@ cmd_doctor() {
   local nmode nsource
   nmode=$(cfg .notify.mode); nsource=$(cfg .notify.source)
   case "$nmode" in
-  off) note notify "notify.mode is off — a red CI and a dead foreman card nowhere" ;;
+  off) note notify "notify.mode is off — a red CI and a stalled shift card nowhere" ;;
   command)
     local ncmd; ncmd=$(cfg '.notify.command[0]')
     # No source on this arm: `--source` is the trill call's flag, and a command
@@ -416,6 +420,21 @@ cmd_doctor() {
     else note notify "notify.mode is auto and trill is not installed — nothing cards on this machine"; fi
     ;;
   esac
+
+  # The lane spawner is the second configured hook, and it is checked the way
+  # `notify.command` is: a program you typed that PATH cannot find blocks,
+  # because every lane would fail to start; none configured is a note, since
+  # the default IS none and a red branch is still reported and carded.
+  sec fixer
+  local fcmd fcap
+  fcmd=$(cfg '.fixer.command[0] // ""'); fcap=$(cfg .fixer.cap)
+  if [ -z "$fcmd" ]; then
+    note fixer "no fixer.command — a red default branch is reported and carded, and no lane is spawned for it"
+  elif have "$fcmd"; then
+    ok fixer "runs $fcmd, at most $fcap lane(s) per repo per day"
+  else
+    bad fixer "fixer.command names $fcmd, which is not on PATH — every lane would fail to start"
+  fi
 
   sec state
   if mkdir -p "$FACTORY_STATE_DIR" 2>/dev/null && [ -w "$FACTORY_STATE_DIR" ]; then

@@ -26,5 +26,9 @@
     "feed": null
   },
 
+  "fixer": {
+    "command": []
+  },
+
   "notify": { "mode": "auto", "source": "factory" }
 }

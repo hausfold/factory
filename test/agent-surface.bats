@@ -45,7 +45,13 @@ setup() {
   cp "$BATS_TEST_DIRNAME/../VERSION" "$ROOT/"
   # `skill` reads `ai/` off FACTORY_HOME, and it reads the DIRECTORY rather
   # than a list — a $ROOT without it turns every case below into "no such
-  # skill" against a tool that ships two.
+  # skill".
+  #
+  # The tool ships ONE skill now, and the install cases below want two: they
+  # are about a run that lands SOME of what it was asked for, which needs a
+  # second file to land. So the fixture plants a sibling under `ai/second/`,
+  # which also keeps the discovery loop — `ai/*/SKILL.md`, the reason a third
+  # skill needs no edit in nix/skill.nix — exercised by something.
   #
   # Read-only, because that is the SHIPPED shape: `flake.nix` copies `ai/` into
   # the store and store files are 444, so `cp` inheriting the source's mode is
@@ -53,6 +59,8 @@ setup() {
   # checkout is 644 and would leave the "install twice" case green forever. The
   # files only — the directories stay writable so bats can clean its tmpdir.
   cp -R "$BATS_TEST_DIRNAME/../ai" "$ROOT/ai"
+  mkdir -p "$ROOT/ai/second"
+  printf -- '---\nname: second\ndescription: a sibling skill the fixture plants so install cases have two files to land\n---\n# second\n' >"$ROOT/ai/second/SKILL.md"
   chmod a-w "$ROOT"/ai/SKILL.md "$ROOT"/ai/*/SKILL.md
   FACTORY="$ROOT/bin/factory"
 
@@ -186,6 +194,40 @@ EOF
   [[ "$output" != *"not on PATH"* ]]
 }
 
+# ── the lane spawner, the second configured hook ──────────────────────────────
+# `fixer.command` is what the runner hands `<repo> <branch> <url>` to on a red
+# default branch. Same two answers as `notify.command`, for the same reasons.
+
+@test "doctor names a fixer.command that PATH cannot find, and blocks on it" {
+  printf '{"scope":{"orgs":["hausfold"]},"fixer":{"command":["spawn-a-lane","--bg"]}}\n' >"$FACTORY_CONFIG"
+  run "$FACTORY" doctor --json
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.checks[] | select(.check == "fixer") | .state' <<<"$output")" = bad ]
+  [[ "$(jq -r '.checks[] | select(.check == "fixer") | .line' <<<"$output")" == *"spawn-a-lane"*"not on PATH"* ]]
+}
+
+@test "a fixer.command that exists is green, and names what it will run and the cap" {
+  printf '#!/usr/bin/env bash\n' >"$TMP/bin/spawn-a-lane"
+  chmod +x "$TMP/bin/spawn-a-lane"
+  printf '{"scope":{"orgs":["hausfold"]},"fixer":{"command":["spawn-a-lane"],"cap":3}}\n' >"$FACTORY_CONFIG"
+  run "$FACTORY" doctor --json
+  [ "$(jq -r '.checks[] | select(.check == "fixer") | .state' <<<"$output")" = ok ]
+  [[ "$(jq -r '.checks[] | select(.check == "fixer") | .line' <<<"$output")" == *"runs spawn-a-lane, at most 3 lane(s)"* ]]
+}
+
+@test "no fixer.command is a note — the default is none, and a red branch is still reported" {
+  run "$FACTORY" doctor --json
+  [ "$(jq -r '.checks[] | select(.check == "fixer") | .state' <<<"$output")" = warn ]
+  [[ "$(jq -r '.checks[] | select(.check == "fixer") | .line' <<<"$output")" == *"no fixer.command"* ]]
+}
+
+@test "config print has a row for the runner and one for the fixer" {
+  run "$FACTORY" config print
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runner"*"a pass every 1200s"* ]]
+  [[ "$output" == *"fixer"*"command -, cap 2 per repo per day"* ]]
+}
+
 @test "notify.mode off is a note, not a block — it is a decision, not a fault" {
   printf '{"scope":{"orgs":["hausfold"]},"notify":{"mode":"off"}}\n' >"$FACTORY_CONFIG"
   run "$FACTORY" doctor
@@ -208,11 +250,12 @@ EOF
 @test "a quiet machine is ready, and says so in both exit code and field" {
   run "$FACTORY" doctor --json
   # No org missing, gh answering, state dir writable: nothing blocks, and the
-  # two notes are the budget feed and the empty afterMerge list. Counted rather
-  # than described: without the trill stub `setup` installs there would be a
-  # third, and a comment is not what keeps that stub load-bearing.
+  # three notes are the budget feed, the empty afterMerge list and the absent
+  # fixer.command. Counted rather than described: without the trill stub
+  # `setup` installs there would be a fourth, and a comment is not what keeps
+  # that stub load-bearing.
   [ "$status" -eq 1 ]
-  [ "$(jq -r .notes <<<"$output")" = 2 ]
+  [ "$(jq -r .notes <<<"$output")" = 3 ]
   [ "$(jq -r .ready <<<"$output")" = true ]
   [ "$(jq -r .blocking <<<"$output")" = 0 ]
   [ "$(jq -r .exit <<<"$output")" = 1 ]
@@ -225,7 +268,7 @@ EOF
   # breaking change and belongs here rather than in a caller's surprise.
   local ids
   ids=$(jq -r '[.checks[].check] | join(" ")' <<<"$output")
-  [[ "$ids" == "jq gh config-file scope digest budget after-merge notify state-dir" ]]
+  [[ "$ids" == "jq gh config-file scope digest budget after-merge notify fixer state-dir" ]]
   [ "$(jq -r '[.checks[] | select(.section == "")] | length' <<<"$output")" = 0 ]
   [ "$(jq -r '[.checks[] | select(.state | test("^(ok|warn|bad)$") | not)] | length' <<<"$output")" = 0 ]
 }
@@ -253,7 +296,7 @@ EOF
   [ "$(jq -r .lease.live <<<"$output")" = false ]
   [ "$(jq -r .lease.line <<<"$output")" = "lease: none" ]
   [ "$(jq -r .watchdog.state <<<"$output")" = no-lease ]
-  [ "$(jq -e 'has("pollerPid")' <<<"$(jq -c .watchdog <<<"$output")")" = true ]
+  [ "$(jq -e 'has("runnerPid")' <<<"$(jq -c .watchdog <<<"$output")")" = true ]
 }
 
 # Silence is a claim: a doctor that could not read the lease must not emit the
@@ -361,9 +404,23 @@ EOF
   run "$FACTORY" skill
   [ "$status" -eq 0 ]
   [[ "$output" == *"name: factory"* ]]
-  run "$FACTORY" skill nightshift
+  run "$FACTORY" skill second
   [ "$status" -eq 0 ]
-  [[ "$output" == *"name: nightshift"* ]]
+  [[ "$output" == *"name: second"* ]]
+}
+
+# The loop skill is gone: its four rules are `factory watchdog run`'s gates
+# now. An agent that still asks for it by name gets the refusal a skill that
+# never existed gets, not a stale copy.
+@test "the nightshift skill no longer ships, and asking for it is a refusal" {
+  run --separate-stderr "$FACTORY" skill nightshift
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"no such skill 'nightshift'"* ]]
+  [ ! -e "$BATS_TEST_DIRNAME/../ai/nightshift" ]
+  # And neither the tool's own skill nor the docs send anyone to it.
+  ! grep -q nightshift "$BATS_TEST_DIRNAME/../ai/SKILL.md"
+  ! grep -qi "foreman" "$BATS_TEST_DIRNAME/../ai/SKILL.md"
 }
 
 @test "a skill this tool does not ship is a refusal on fd 2, not an empty document" {
@@ -426,7 +483,7 @@ EOF
   run "$FACTORY" skill install --dir "$TMP/scratch"
   [ "$status" -eq 0 ]
   [ -f "$TMP/scratch/factory/SKILL.md" ]
-  [ -f "$TMP/scratch/nightshift/SKILL.md" ]
+  [ -f "$TMP/scratch/second/SKILL.md" ]
   [[ "$output" == *"2 written, 0 left alone"* ]]
 }
 
@@ -457,7 +514,7 @@ EOF
   run "$FACTORY" skill install --client claude
   [ "$status" -eq 0 ]
   [[ "$output" == *"haus.ai.skill already did"* ]]
-  [ -f "$HOME/.claude/skills/nightshift/SKILL.md" ]
+  [ -f "$HOME/.claude/skills/second/SKILL.md" ]
   [ -L "$HOME/.claude/skills/factory" ]
 }
 
@@ -466,9 +523,9 @@ EOF
 # non-zero here would have an agent report a broken command and retry with
 # more force, against a directory where force corrupts a generation.
 @test "a run that finds only symlinks says so, and does not read as a failure" {
-  mkdir -p "$TMP/scratch" "$TMP/store/factory" "$TMP/store/nightshift"
+  mkdir -p "$TMP/scratch" "$TMP/store/factory" "$TMP/store/second"
   ln -s "$TMP/store/factory" "$TMP/scratch/factory"
-  ln -s "$TMP/store/nightshift" "$TMP/scratch/nightshift"
+  ln -s "$TMP/store/second" "$TMP/scratch/second"
   run "$FACTORY" skill install --dir "$TMP/scratch"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to install"* ]]
@@ -549,5 +606,5 @@ EOF
   [ "$status" -eq 3 ]
   [[ "$output" == *"cannot write it"* ]]
   [ -f "$HOME/.codex/skills/factory/SKILL.md" ]
-  [ -f "$HOME/.codex/skills/nightshift/SKILL.md" ]
+  [ -f "$HOME/.codex/skills/second/SKILL.md" ]
 }

@@ -12,13 +12,15 @@
 # `test/factory-tier.bats` stubs `gh` and runs the real jq filter — a case per
 # clause, each written so that deleting the clause fails it.
 #
-# `factory-watchdog` is the same argument one layer down, and its silence is
-# harder still: it fires only when the foreman is gone, so nobody ever sees it
-# work on a good night. `test/factory-watchdog.bats` writes lease files and ages
-# logs directly to make every stall shape observable on a runner.
+# `factory-watchdog` is the runner, and its silence is the loudest of all: it
+# passes every twenty minutes while nobody is watching, decides which red
+# branch gets a fixer lane, and revokes the lease when its passes stop landing.
+# `test/factory-watchdog.bats` stubs `factory-shift` with a scripted event
+# stream, writes lease files and ages logs directly, so every gate and every
+# stall shape is observable on a runner in seconds.
 #
 # `factory-lease` was only ever reached as somebody else's fixture — a grant to
-# start the poller above, a lease file written directly, a `chmod -x` to make
+# start the runner above, a lease file written directly, a `chmod -x` to make
 # `doctor` report it missing — so nothing had handed `grant` a duration nobody
 # would type. `test/factory-lease.bats` is the verb's own, and its subject is
 # the same shape as the three above: a grant that prints ✓ and is already

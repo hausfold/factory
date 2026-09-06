@@ -1,16 +1,15 @@
 # factory's agent skills, as a derivation.
 #
-# TWO skills, one derivation, one directory each:
+# ONE skill today, one directory, and a layout that takes more without an edit:
 #
-#   ai/SKILL.md            → $out/factory/SKILL.md     the verbs
-#   ai/nightshift/SKILL.md → $out/nightshift/SKILL.md  the loop that drives them
+#   ai/SKILL.md          → $out/factory/SKILL.md   the verbs
+#   ai/<name>/SKILL.md   → $out/<name>/SKILL.md    any sibling, discovered
 #
-# The second is not a second copy of the first. `factory` teaches an agent what
-# to run when the user says "merge the safe PRs" or "why didn't #212 merge".
-# `nightshift` teaches it the one thing that has no verb: the cadence, the fixer
-# cap, and what to do with each line a pass printed. The tool is deliberately
-# one pass at a time — something has to decide to call it again, and that
-# something is judgement rather than a flag.
+# There used to be a second, `nightshift`: the loop that called `factory shift`
+# on a cadence and applied four rules to every CI-RED line. Its judgement was
+# four string checks and a retry counter, so it is code now — `factory watchdog
+# run` is the runner, started by `lease grant` — and the skill is gone. The
+# loop below still walks `ai/*/` so a real second skill needs no edit here.
 #
 # `$out/<name>/SKILL.md` is the family standard's compliant-tool layout: one
 # nesting level, named for the SKILL rather than the tool, so a consumer links a

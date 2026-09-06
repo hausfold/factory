@@ -119,8 +119,8 @@ out() {
 #
 # For a line whose payload is one unbreakable token: snug's `ui_fold` hard-cuts
 # a word longer than the budget, so a CI failure's URL comes out split across a
-# hanging indent, unclickable and no longer the one-line shape the foreman's
-# skill reads. A terminal's own wrap keeps the token contiguous in the buffer,
+# hanging indent, unclickable and no longer the one-line shape the log is
+# read by. A terminal's own wrap keeps the token contiguous in the buffer,
 # which is the better failure at 60 columns.
 out_line() {
   local painted

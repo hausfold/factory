@@ -1,70 +1,113 @@
 #!/usr/bin/env bash
-# factory-watchdog — notice that the FOREMAN died, which no pass can report.
+# factory-watchdog — the RUNNER: while the lease is live, pass `factory shift`
+# on a cadence, spawn the fixer lanes the four gates let through, and notice
+# when the passes stop landing.
 #
-#   factory watchdog once     # 0 healthy · 3 stalled · 4 no poller · 1 no lease
-#   factory watchdog ensure   # the same, and start a poller if one is missing
-#   factory watchdog run      # poll until the lease ends
+#   factory watchdog once     # 0 alive · 3 stalled · 4 no runner · 1 no lease
+#   factory watchdog ensure   # the same, and start a runner if one is missing
+#   factory watchdog run      # the runner itself: pass until the lease ends
 #   factory watchdog stop
 #
-# `factory shift`'s four unknown lines keep a pass that could not SEE from
-# reading as a quiet night. This is the layer under them, and it exists because
-# every one of those lines has to be written by a pass that RAN: the foreman is
-# an agent session driving a loop, and that loop continues only if a turn
-# completes and schedules the next wakeup. A turn that ends in an error
-# schedules nothing, so nothing is left running and nothing is left to say so —
-# the log's last line is an ordinary `pass done` while the lease goes on
-# standing.
+# This file used to be a poller that measured the liveness of a FOREMAN — an
+# agent session driving `factory shift` in a loop and applying four rules to
+# every CI-RED line it printed — and revoked the lease when that session died.
+# The foreman is gone. Its judgement was four string checks and a retry
+# counter, and a rule that is four string checks is code, not a skill: written
+# here it is deterministic, tested, and needs no agent pane to have stayed
+# alive. `factory lease grant 12h` now starts this, and this runs the night.
 #
-# THE HEARTBEAT IS THE SHIFT LOG'S MTIME. Every `say` in `factory-shift`
-# appends to $FACTORY_STATE_DIR/shift-YYYYMMDD.log, so that file's modification
-# time is "the last moment the shift was demonstrably alive" — during a pass as
-# well as at the end of one. It costs `factory-shift` nothing and adds no second
-# artifact that could disagree with the first.
+# ONE PASS EVERY runner.interval (20m). `factory shift --json` is run with its
+# events captured and its human lines going to the shift log as they always
+# have. Off the events, three things:
+#
+#   retry    a pass that could not SEE — `prs-unknown`, `tier-unknown`,
+#            `ci-unknown`, `after-merge-failed`, or a `pass ABORTED` — is run
+#            once more at the next tick (watchdog.interval, 5m) rather than
+#            the next cadence. Once: a second unknown is a story for the
+#            morning, not a loop, and both lines are in the log.
+#   fixers   every `ci-red` event is put through the four gates below, and
+#            the verdict is a line in the log whichever way it went.
+#   failed   a shift that exited before writing anything — a config gone
+#            invalid mid-night, `jq` missing — is `pass-failed` with its
+#            stderr, and NOT a heartbeat (see `note`).
+#
+# THE FOUR FIXER GATES, in the order their reason is quoted. A red default
+# branch gets a lane only when all four hold, and each refusal names itself:
+#
+#   command  `fixer.command` is configured. The default is none, so a machine
+#            that has not said what a lane IS spawns nothing however red the
+#            branch — `fixer-skipped: … no fixer.command configured`.
+#   novelty  no `fixer-spawned: <repo> <head sha>` line in ANY shift log. A
+#            head SHA is globally unique, so the search is every log and not
+#            tonight's: a fix that broke CI again does not get a third machine,
+#            and a red that stood across midnight does not get a lane a day.
+#   cap      fewer than `fixer.cap` (2) `fixer-spawned: <repo> ` lines in
+#            TODAY's log. Per calendar day, because the log is.
+#   budget   the pass's `budget` event says `fixer: true`. Its `reason` is
+#            quoted otherwise, and `budget unknown` is a refusal like any
+#            other — an unreadable quota is not permission.
+#
+# The fourth rule the foreman carried — default branch only — is answered
+# before this file asks it: `factory shift` queries `-b "$base"`, so every
+# `ci-red` it reports is on the default branch by construction. The event
+# carries `branch` so the lane is handed a fact rather than a re-derivation.
+#
+# A lane is `fixer.command` plus three words, `<repo> <default branch> <run
+# url>`, run in this process's turn with stdin closed. It has to RETURN once
+# the lane is started — a spawner, not the lane — because a command that waits
+# for the lane to finish holds every pass after it. Exit 0 is `fixer-spawned:
+# <repo> <head sha>`; anything else is `fixer-failed` with its stderr, and a
+# card, since a configured thing that cannot work is `after-merge-failed`'s
+# shape. A failed spawn counts toward neither cap nor novelty: nothing was
+# spawned, and the next pass tries again.
+#
+# THE HEARTBEAT IS STILL THE SHIFT LOG'S MTIME, and it still matters, because
+# a runner that is alive is not the same as passes that are landing. Every
+# `say` in `factory-shift` appends to $FACTORY_STATE_DIR/shift-YYYYMMDD.log,
+# so that file's mtime is "the last moment a pass was demonstrably running".
+# What can make it go quiet under a live runner is a shift that dies before
+# its first `say` — every twenty minutes, with the lease standing — or one
+# pass hanging inside a `gh` call. Two thresholds, as before:
+#
+#   watchdog.stale (45m)  quiet for longer than the cadence plus slack. Says so
+#                         in the log (`shift-stalled`), draws ONE card, and the
+#                         lease stands.
+#   watchdog.dead  (90m)  quiet for twice that. The lease is REVOKED and this
+#                         exits (`shift-dead`). Authority to merge unattended
+#                         belongs to passes that are running; the morning
+#                         should find the ordinary human-in-the-loop workflow
+#                         rather than a standing grant nobody is exercising.
 #
 # Which forces two things this file would be wrong without:
 #
 #   1. This script's own lines go in that same log — one morning report, not
-#      two — so `note` RESTORES the mtime after appending. A watchdog whose
-#      `foreman-stalled` line reset the clock it reads would find itself healthy
-#      on the next poll, write `foreman-resumed`, and alternate forever without
-#      the quiet time ever reaching $DEAD. The revoke below would then be
-#      unreachable code.
+#      two — so `note` RESTORES the mtime after appending. A runner whose
+#      `pass-failed` line reset the clock it reads would keep a lease standing
+#      under a shift that cannot start, forever, with a named line every
+#      twenty minutes reading as a heartbeat. Only a pass is a heartbeat.
 #   2. `last_seen` is the LATER of the newest log's mtime and the lease's own
 #      grant stamp, never just the log. Logs are per-day and never swept, so on
 #      every night after the first a fresh grant would otherwise be judged
 #      against yesterday's file and revoked within milliseconds of being made.
 #
-# TWO THRESHOLDS, because a blip and a death want different answers:
+# AND A SLEEPING MACHINE IS NOT A STALLED SHIFT. Both thresholds count time
+# this process was AWAKE for, not wall clock: a machine that suspended for two
+# hours wakes with the log two hours old through nobody's fault. The loop
+# notices its own `sleep` overrunning and subtracts the excess. SUBTRACTED,
+# rather than forgiven with a grace window, which is what this did first and
+# got wrong: a laptop that suspends and wakes all night renews a window faster
+# than it expires, so a shift that genuinely could not run kept its lease
+# until morning. Awake time accumulates across any number of naps; only the
+# naps themselves are free.
 #
-#   watchdog.stale (45m)  quiet for longer than the cadence plus slack. Says so
-#                         in the log and draws ONE card. The lease stands — a
-#                         foreman whose network dropped for one turn can still
-#                         be mid-retry, and revoking under it would turn a
-#                         recoverable blip into a shift that needs a person.
-#   watchdog.dead  (90m)  quiet for twice that. The lease is REVOKED and this
-#                         exits. Authority to merge unattended belongs to a
-#                         foreman that is running; the morning should find the
-#                         ordinary human-in-the-loop workflow rather than a
-#                         standing grant nobody is exercising.
-#
-# A recovery re-arms the card, so a night that stalls twice reports twice.
-#
-# AND A SLEEPING MACHINE IS NOT A DEAD FOREMAN. Both thresholds count time this
-# process was AWAKE for, not wall clock: a machine that suspended for two hours
-# wakes with the log two hours old through nobody's fault, the foreman included.
-# The loop notices its own `sleep` overrunning and subtracts the excess.
-# SUBTRACTED, rather than forgiven with a grace window, which is what this did
-# first and got wrong: a laptop that suspends and wakes all night renews a
-# window faster than it expires, so a genuinely dead foreman kept its lease
-# until morning and never even drew a stall card. Awake time accumulates across
-# any number of naps; only the naps themselves are free.
-#
-# WHAT IT DELIBERATELY DOES NOT DO: run `factory shift` itself. It could — the
-# script is deterministic and the lease is the authority it would run under —
-# but merging with no foreman means a `CI-RED` nobody reads and a `merge-failed`
-# nobody retries, which is a factory that keeps its hands moving after its eyes
-# have closed. Widening this into a headless foreman is a design change first,
-# not a flag here.
+# WHAT KEEPS THE RUNNER ITSELF ALIVE is not this file. A runner can be lost to
+# a reboot, a panic or an OOM kill, and there is deliberately no second process
+# watching for that: on a machine whose launchd owns it, KeepAlive restarts it
+# and it passes again; anywhere else, `lease grant` and `watchdog ensure` start
+# one, and `watchdog once` — which `doctor` carries — says NO RUNNER at exit 4
+# for as long as a live lease has none. A dead runner restarts instead of
+# being reported, and a lease it left standing is the status quo: PRs open,
+# waiting for you.
 # Every jq program in this file is single-quoted on purpose: `$d`, `$repo` and
 # the rest are jq's OWN variables, bound by --arg/--argjson, and expanding them
 # in the shell first is exactly the bug the quoting prevents.
@@ -77,19 +120,21 @@ factory_load
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 LEASECMD="$(dirname "$SELF")/factory-lease"
+SHIFTCMD="$(dirname "$SELF")/factory-shift"
 LEASE="$FACTORY_STATE_DIR/lease"
 PIDFILE="$FACTORY_STATE_DIR/watchdog.pid"
 # Env beats config so a suite can make a 45-minute threshold reachable in
 # seconds without writing a config file for every case — and only DOWNWARD. A
-# poller inherits the environment of whoever ran `lease grant`, and on a night
-# shift that is the foreman: a variable that could lengthen `dead` is a foreman
-# able to keep its lease after it dies, which is the one thing this script
-# exists to take away. Refused rather than clamped, because a number that was
-# set and silently not used is the swallow every verb here refuses — and
-# `config print`'s watchdog row is then still what is in force.
-threshold() { # threshold <env var> <watchdog key>
+# runner inherits the environment of whoever ran `lease grant`: a variable that
+# could lengthen `dead` is a lease able to stand after its passes stopped,
+# which is the one thing this script exists to take away, and one that could
+# lengthen `runner.interval` is a night of fewer passes than the policy says.
+# Refused rather than clamped, because a number that was set and silently not
+# used is the swallow every verb here refuses — and `config print`'s rows are
+# then still what is in force.
+threshold() { # threshold <env var> <config key, e.g. watchdog.dead>
   local from_cfg from_env
-  from_cfg=$(cfg ".watchdog.$2")
+  from_cfg=$(cfg ".$2")
   from_env="${!1:-}"
   if [ -z "$from_env" ]; then printf '%s\n' "$from_cfg"; return 0; fi
   # Digits, at most 18 of them, then read in base 10 — the lease's own three
@@ -102,23 +147,32 @@ threshold() { # threshold <env var> <watchdog key>
       printf '%s\n' "$from_env"; return 0
     fi
   fi
-  die "$1=$from_env — the environment may only shorten watchdog.$2 (${from_cfg}s), never lengthen it"
+  die "$1=$from_env — the environment may only shorten $2 (${from_cfg}s), never lengthen it"
 }
-STALE=$(threshold FACTORY_STALE stale) || exit 2
-DEAD=$(threshold FACTORY_DEAD dead) || exit 2
-INTERVAL=$(threshold FACTORY_WATCHDOG_INTERVAL interval) || exit 2
-# The config's own invariant, re-asked over the overrides: the validator saw
-# only the file, and a DEAD shortened under an unshortened STALE is a watchdog
-# that revokes before it has warned anybody.
+STALE=$(threshold FACTORY_STALE watchdog.stale) || exit 2
+DEAD=$(threshold FACTORY_DEAD watchdog.dead) || exit 2
+INTERVAL=$(threshold FACTORY_WATCHDOG_INTERVAL watchdog.interval) || exit 2
+RUNNER_INTERVAL=$(threshold FACTORY_RUNNER_INTERVAL runner.interval) || exit 2
+# The config's own invariants, re-asked over the overrides: the validator saw
+# only the file. A DEAD shortened under an unshortened STALE is a runner that
+# revokes before it has warned anybody; a STALE shortened under an unshortened
+# cadence is a runner that calls its own gap between two passes a stall — and,
+# with DEAD inside the cadence too, revokes its own lease between two passes it
+# was about to run.
 [ "$DEAD" -gt "$STALE" ] || die "FACTORY_DEAD=$DEAD is not greater than the stale threshold ($STALE)"
+[ "$STALE" -gt "$RUNNER_INTERVAL" ] || die "FACTORY_STALE=$STALE is not greater than the pass cadence ($RUNNER_INTERVAL)"
+CAP=$(cfg .fixer.cap)
+# The lane spawner's argv, read once. Empty is the default and the first gate.
+FIXER_ARGV=()
+while IFS= read -r a; do FIXER_ARGV+=("$a"); done < <(cfg '.fixer.command[]?')
 mkdir -p "$FACTORY_STATE_DIR"
 
 usage() {
   cat >&2 <<'EOF'
 usage:
-  factory watchdog once     # 0 healthy · 3 stalled · 4 live lease, no poller · 1 no lease
-  factory watchdog ensure   # the same check, and start a poller if one is missing
-  factory watchdog run      # poll until the lease ends; revoke a dead foreman's
+  factory watchdog once     # 0 alive · 3 stalled · 4 live lease, no runner · 1 no lease
+  factory watchdog ensure   # the same check, and start a runner if one is missing
+  factory watchdog run      # the runner: pass every runner.interval until the lease ends
   factory watchdog stop
 EOF
   exit 2
@@ -136,14 +190,14 @@ for a in "$@"; do
 done
 set -- ${args[@]+"${args[@]}"}
 # Every verb here takes no argument, so a second word is a call this cannot
-# have understood — `stop now` stops the poller no differently from `stop`, and
+# have understood — `stop now` stops the runner no differently from `stop`, and
 # a caller who typed the word meant something by it.
 [ $# -le 1 ] || usage
 
-# The last moment the shift was demonstrably alive: the newest shift log's mtime
-# or the moment the lease was granted, whichever is LATER. Prints nothing and
-# fails when there is no lease — the caller's cue that there is no shift to
-# watch, which is not the same as a shift that is quiet.
+# The last moment a pass was demonstrably running: the newest shift log's
+# mtime or the moment the lease was granted, whichever is LATER. Prints nothing
+# and fails when there is no lease — the caller's cue that there is no shift
+# to watch, which is not the same as a shift that is quiet.
 last_seen() {
   local newest="" f stamp m seen=0
   for f in "$FACTORY_STATE_DIR"/shift-*.log; do
@@ -162,25 +216,31 @@ last_seen() {
   printf '%s\n' "$seen"
 }
 
+today_log() { printf '%s\n' "$FACTORY_STATE_DIR/shift-$(date +%Y%m%d).log"; }
+
 # Append to today's shift log WITHOUT counting as a heartbeat. One morning
-# report is worth the bookkeeping; a watchdog that touched the mtime it reads
-# would be reporting itself alive. See note 1 in the header.
+# report is worth the bookkeeping; a runner that touched the mtime it reads
+# would be reporting a pass that never ran. See note 1 in the header.
 #
 # The restore is skipped when the file grew by more than our own line while we
-# were writing — that is `factory-shift` landing a real pass in the same
-# instant, and rewinding the clock over it would erase the recovery this script
-# is waiting for.
-note() {
-  local f before size_before size_after line grew
-  f="$FACTORY_STATE_DIR/shift-$(date +%Y%m%d).log"
+# were writing — that is a pass landing in the same instant, and rewinding the
+# clock over it would erase the heartbeat this script is waiting for.
+note() { # note <ok|warn|info> <line>
+  local mark="$1" f before size_before size_after line grew
+  shift
+  f=$(today_log)
   before=$(last_seen) || before=""
   line="$(date '+%H:%M') $*"
   size_before=0
   if [ -e "$f" ]; then size_before=$(wc -c <"$f" | tr -d ' '); fi
   # Marked on screen, plain in the log: the log is grepped for its event names
-  # by the morning's handover and by this repo's own tests, and a mark in front
-  # of one is a mark in front of every pattern that reads it.
-  out_warn "$*"
+  # by this repo's own tests and by whoever reads the morning, and a mark in
+  # front of one is a mark in front of every pattern that reads it.
+  case "$mark" in
+  ok) out_ok "$*" ;;
+  warn) out_warn "$*" ;;
+  *) out_info "$*" ;;
+  esac
   printf '%s\n' "$line" >>"$f"
   [ -n "$before" ] || return 0
   # Measured in BYTES both sides. `${#line}` counts CHARACTERS, and these lines
@@ -206,7 +266,7 @@ is_watchdog() {
   cmd=$(ps -p "$1" -o command= 2>/dev/null || ps -p "$1" -o args= 2>/dev/null) || return 1
   case "$cmd" in *factory-watchdog\ run) return 0 ;; *) return 1 ;; esac
 }
-poller_pid() { # prints a live watchdog's pid, or fails
+runner_pid() { # prints a live runner's pid, or fails
   local pid
   [ -s "$PIDFILE" ] || return 1
   pid=$(cat "$PIDFILE" 2>/dev/null)
@@ -215,7 +275,7 @@ poller_pid() { # prints a live watchdog's pid, or fails
   printf '%s\n' "$pid"
 }
 
-# 0 healthy · 3 stalled · 1 nothing to watch. The quiet duration goes to stdout
+# 0 alive · 3 stalled · 1 nothing to watch. The quiet duration goes to stdout
 # in both of the first two cases so callers need not re-derive it. $1 is the
 # suspended-time discount; `once` has none to pass.
 check() {
@@ -236,10 +296,11 @@ check() {
   return 0
 }
 
-# Start a detached poller unless a live one is already there. Shared by `ensure`
-# and by `factory lease grant`, so the invariant has one implementation.
+# Start a detached runner unless a live one is already there. Shared by
+# `ensure` and by `factory lease grant`, so the invariant has one
+# implementation.
 spawn() {
-  poller_pid >/dev/null && return 0
+  runner_pid >/dev/null && return 0
   nohup "$SELF" run >/dev/null 2>&1 &
   disown 2>/dev/null || true
 }
@@ -247,8 +308,8 @@ spawn() {
 report() { # report <state> <quiet secs> <human line>
   if [ "$json" = 1 ]; then
     jq -nc --arg state "$1" --argjson quiet "${2:-0}" --arg line "$3" \
-      --argjson pid "$(poller_pid 2>/dev/null || echo null)" \
-      '{state: $state, quietSeconds: $quiet, pollerPid: $pid, line: $line}'
+      --argjson pid "$(runner_pid 2>/dev/null || echo null)" \
+      '{state: $state, quietSeconds: $quiet, runnerPid: $pid, line: $line}'
   else
     # The state names the mark, so the two can never disagree: `alive` is the
     # only ✓ here, `no-lease` is the ordinary quiet of a machine nobody granted
@@ -256,33 +317,123 @@ report() { # report <state> <quiet secs> <human line>
     # happening" are the ones worth a ⚠.
     case "$1" in
     alive) out_ok "$3" ;;
-    no-poller | stalled) out_warn "$3" ;;
+    no-runner | stalled) out_warn "$3" ;;
     *) out_info "$3" ;;
     esac
+  fi
+}
+
+# ── one pass, and what the runner does with it ────────────────────────────────
+# Where the shift's stderr and a fixer command's output are parked long enough
+# to be quoted into a log line. Under the state dir rather than mktemp so a
+# killed runner leaves it beside the log it belongs to.
+ERRF="$FACTORY_STATE_DIR/.runner-stderr.$$"
+
+# The fixer gates, for one `ci-red` event. Every arm ends in a line.
+fixer() { # fixer <repo> <branch> <head sha> <run url> <budget ok> <budget reason>
+  local repo="$1" branch="$2" head="$3" url="$4" ok="$5" why="$6" n rc
+  if [ "${#FIXER_ARGV[@]}" -eq 0 ]; then
+    note info "fixer-skipped: $repo — no fixer.command configured"
+    return 0
+  fi
+  # No head, no novelty judgement — and a lane spawned on a failure this
+  # cannot later recognise is a lane it could spawn again every pass.
+  if [ -z "$head" ]; then
+    note warn "fixer-skipped: $repo — the run's head SHA was not reported, so this failure could not be told from the last"
+    return 0
+  fi
+  # `-F`: a repo name has a `/` in it and a SHA is hex, neither of which is a
+  # pattern. `-s`: a state dir with no logs yet is a machine on its first
+  # night, not an error.
+  if grep -qsF -- "fixer-spawned: $repo $head" "$FACTORY_STATE_DIR"/shift-*.log; then
+    note info "fixer-skipped: $repo — a lane was already spawned for $head"
+    return 0
+  fi
+  # `grep -c` prints the count and exits 1 when it is zero, and prints nothing
+  # at all for a file that is not there — so the answer is read as a number
+  # and not as an exit status.
+  n=$(grep -csF -- "fixer-spawned: $repo " "$(today_log)" 2>/dev/null) || true
+  num "${n:-}" || n=0
+  if [ "$n" -ge "$CAP" ]; then
+    note info "fixer-skipped: $repo — $n lane(s) already today, fixer.cap is $CAP"
+    return 0
+  fi
+  if [ "$ok" != true ]; then
+    note info "fixer-skipped: $repo — budget: ${why:-budget unknown}"
+    return 0
+  fi
+  if "${FIXER_ARGV[@]}" "$repo" "$branch" "$url" </dev/null >"$ERRF" 2>&1; then
+    note ok "fixer-spawned: $repo $head — lane on $branch for $url"
+  else
+    rc=$?
+    note warn "fixer-failed: $repo $head — fixer.command exited $rc: $(oneline "$(cat "$ERRF")")"
+    notify fault "factory: fixer lane for $repo did not start"
+  fi
+}
+
+# Run `factory shift --json`, act on its events, and set `retry` if this pass
+# earned one more. `$1` says whether THIS pass was already the retry.
+pass() { # pass <was retry: 0|1>
+  local was_retry="$1" out rc events ok why kinds repo branch head url
+  out=$("$SHIFTCMD" --json </dev/null 2>"$ERRF"); rc=$?
+  # 0 is a pass; 1 is `pass ABORTED`, which the shift wrote itself and whose
+  # `aborted` event is below. Anything else is the shift not running at all —
+  # `die` at exit 2 before its first `say`, or a signal — and that is not a
+  # heartbeat: `note` restores the mtime, so a shift that cannot start reaches
+  # `dead` on the ordinary clock.
+  case "$rc" in
+  0 | 1) ;;
+  *)
+    note warn "pass-failed: factory shift exited $rc before a pass could run — $(oneline "$(cat "$ERRF")")"
+    return 0
+    ;;
+  esac
+  # Slurped into one array rather than read line by line, so an output that is
+  # not the event stream this file was promised is one refusal and not a
+  # silent zero of every count below.
+  if ! events=$(printf '%s\n' "$out" | jq -sc . 2>/dev/null); then
+    note warn "pass-failed: factory shift's --json output could not be read — $(oneline "$out")"
+    return 0
+  fi
+  ok=$(jq -r '[.[] | select(.event == "budget")] | last | .fixer // false' <<<"$events")
+  why=$(jq -r '[.[] | select(.event == "budget")] | last | .reason // "budget unknown"' <<<"$events")
+  # The head SHA is read LAST, because it is the one field that can be empty
+  # and a tab is whitespace to `read`: two tabs around an empty field collapse
+  # into one, every column after it shifts left, and the URL would arrive as
+  # the head. A trailing empty field is the one place `read` leaves alone.
+  while IFS=$'\t' read -r repo branch url head; do
+    [ -n "$repo" ] || continue
+    fixer "$repo" "$branch" "${head:-}" "$url" "$ok" "$why"
+  done < <(jq -r '.[] | select(.event == "ci-red") | [.repo, .branch, .url, (.head // "")] | @tsv' <<<"$events")
+  kinds=$(jq -r '[.[] | select(.event | IN("aborted", "prs-unknown", "tier-unknown", "ci-unknown", "after-merge-failed")) | .event] | unique | join(", ")' <<<"$events")
+  if [ -n "$kinds" ] && [ "$was_retry" = 0 ]; then
+    retry=1
+    note info "pass-retry: $kinds — one more pass at the next tick"
   fi
 }
 
 case "${1:-}" in
 once | ensure)
   quiet=$(check); rc=$?
-  # `ensure` is the loop's verb: `grant` establishes the invariant once, and a
-  # poller can still be lost to a reboot, a panic or an OOM kill, which is the
-  # likeliest overnight foreman-killer after an API error precisely because it
-  # takes both of them at once.
+  # `ensure` is the verb that re-establishes the invariant: `grant` starts a
+  # runner once, and one can still be lost to a reboot, a panic or an OOM
+  # kill. On a launchd machine that is launchd's job and this finds nothing
+  # to do; anywhere else, this is what `doctor`'s NO RUNNER line tells you to
+  # run.
   if [ "$1" = ensure ] && [ "$rc" != 1 ]; then
     spawn
     sleep 1
   fi
   case "$rc" in
   0)
-    # A live lease with no poller is its own fault, and a distinct one: the
-    # shift is running and nothing is watching it. `grant` starts the poller
+    # A live lease with no runner is its own fault, and a distinct one: the
+    # lease stands and nothing is passing under it. `grant` starts the runner
     # with all output discarded, so a lost exec bit or a failed spawn is
     # otherwise silent — and silent is the one thing this script may not be.
-    if poller_pid >/dev/null; then
-      report alive "$quiet" "watchdog: shift alive — last pass $((quiet / 60))m ago, poller watching"
+    if runner_pid >/dev/null; then
+      report alive "$quiet" "watchdog: shift alive — last pass $((quiet / 60))m ago, runner up"
     else
-      report no-poller "$quiet" "watchdog: NO POLLER — the lease is live and nothing is watching the foreman"
+      report no-runner "$quiet" "watchdog: NO RUNNER — the lease is live and nothing is passing under it"
       rc=4
     fi
     ;;
@@ -292,7 +443,15 @@ once | ensure)
   exit "$rc"
   ;;
 run)
-  # One watchdog per machine, claimed by writing the pid to a private name and
+  # A runner with no shift to run is not a runner. Fatal for the reason an
+  # unreachable lease command is in `check`: a live lease under a process
+  # that could pass nothing is exactly the standing grant this exists to
+  # refuse, and it would otherwise sit here reporting itself alive.
+  if [ ! -x "$SHIFTCMD" ]; then
+    fail "cannot run $SHIFTCMD — no pass can be run, so there is nothing to be the runner of"
+    exit 2
+  fi
+  # One runner per machine, claimed by writing the pid to a private name and
   # HARD-LINKING that into place: `ln` fails when the name is taken, which is
   # the same exclusion an O_EXCL create gives, but the file holds the pid
   # before it has the shared name. Neither a read-then-write nor an O_EXCL
@@ -301,8 +460,8 @@ run)
   # not see — still holding a trap that would delete its successor's pidfile.
   # O_EXCL closed that and left a narrower door open: exclusive is not atomic,
   # so the pidfile exists EMPTY between the create and the write, and an empty
-  # pidfile is exactly what the recovery below reads as a crashed poller's. A
-  # racer landing in that window deleted a live poller's claim and started a
+  # pidfile is exactly what the recovery below reads as a crashed runner's. A
+  # racer landing in that window deleted a live runner's claim and started a
   # duplicate on top of it.
   #
   # Which makes the recovery's reading true rather than merely usual: nothing
@@ -320,7 +479,7 @@ run)
   if (printf '%s\n' "$$" >"$mine") 2>/dev/null && [ -s "$mine" ]; then
     if ln "$mine" "$PIDFILE" 2>/dev/null; then
       claimed=1
-    elif pid=$(poller_pid); then
+    elif pid=$(runner_pid); then
       out_info "watchdog: already running (pid $pid)"
       rm -f "$mine"
       exit 0
@@ -332,19 +491,36 @@ run)
   fi
   rm -f "$mine"
   [ "$claimed" = 1 ] || { fail "could not claim $PIDFILE"; exit 1; }
-  # Only ever remove a pidfile that is still OURS, so a poller exiting late
+  # Only ever remove a pidfile that is still OURS, so a runner exiting late
   # cannot delete the successor's.
-  trap 'if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ]; then rm -f "$PIDFILE"; fi' EXIT
+  trap 'if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ]; then rm -f "$PIDFILE"; fi; rm -f "$ERRF"' EXIT
   carded=0
   slept=0
   prev_seen=""
+  # The first pass is due at once: a grant should be followed by a pass within
+  # seconds, and a runner launchd restarted after a crash has a gap to close.
+  last_pass=0
+  passes=0
+  retry=0
   while :; do
+    now=$(date +%s)
+    if [ "$retry" = 1 ] || [ $((now - last_pass)) -ge "$RUNNER_INTERVAL" ]; then
+      # Under a lease, or not at all — and the lease is asked here, not
+      # trusted from the last tick: a `revoke` lands between ticks.
+      if "$LEASECMD" status >/dev/null 2>&1; then
+        was_retry=$retry
+        retry=0
+        last_pass=$now
+        passes=$((passes + 1))
+        pass "$was_retry"
+      fi
+    fi
     quiet=$(check "$slept"); rc=$?
-    # Did the SHIFT move, as opposed to the clock? `note` restores the mtime
-    # after its own writes, so a heartbeat that advanced is always a real pass.
-    # This is what resets the discount and clears the stall — not `quiet` falling
-    # back under $STALE, which a large discount alone can do while the foreman is
-    # still just as dead.
+    # Did a PASS land, as opposed to the clock moving? `note` restores the
+    # mtime after its own writes, so a heartbeat that advanced is always a
+    # real pass. This is what resets the discount and clears the stall — not
+    # `quiet` falling back under $STALE, which a large discount alone can do
+    # while the shift is still just as stuck.
     seen=$(last_seen) || seen=""
     moved=0
     if [ -n "$seen" ] && [ "$seen" != "$prev_seen" ]; then
@@ -354,22 +530,27 @@ run)
     if [ "$moved" = 1 ]; then
       slept=0
       if [ "$carded" = 1 ]; then
-        note "foreman-resumed: a pass landed after the stall"
+        note info "shift-resumed: a pass landed after the stall"
         carded=0
       fi
     fi
     case "$rc" in
     1)
-      # The lease ended. If the foreman was alive to the end it wrote its own
-      # handover; this exits quietly rather than adding a line to it.
+      # The lease ended. A runner that passed under it says so, once, so the
+      # log's last line is the end of the shift and not merely its last pass;
+      # one that never saw a lease — started after the expiry, or racing a
+      # revoke — has nothing to add. No lease, so `note` restores nothing.
+      [ "$passes" -eq 0 ] || note info "shift-over: lease ended — $passes pass(es) this run"
       exit 0
       ;;
     3)
       if [ "$quiet" -ge "$DEAD" ]; then
         IFS=$'\t' read -r expires _ _ <"$LEASE"
-        note "foreman-gone: no pass in $((quiet / 60))m awake — lease revoked (it stood until $(at "$expires"))"
+        stood="it stood until $(at "$expires")"
+        [ "$expires" != never ] || stood="it was indefinite"
+        note warn "shift-dead: no pass in $((quiet / 60))m awake — lease revoked ($stood)"
         # Drop the pidfile BEFORE revoking. `factory lease revoke` stops the
-        # watchdog, and the watchdog is us: left in place, that line would have
+        # runner, and the runner is us: left in place, that line would have
         # us kill ourselves mid-sentence, before the card saying why.
         rm -f "$PIDFILE"
         "$LEASECMD" revoke >/dev/null 2>&1 || true
@@ -377,12 +558,12 @@ run)
         exit 3
       fi
       if [ "$carded" = 0 ]; then
-        note "foreman-stalled: no pass in $((quiet / 60))m — lease still standing"
+        note warn "shift-stalled: no pass in $((quiet / 60))m — lease still standing"
         notify fault "shift stalled — $((quiet / 60))m with no pass"
         carded=1
       fi
       ;;
-    *) : ;; # healthy — the recovery, if there was one, is handled above
+    *) : ;; # alive — the recovery, if there was one, is handled above
     esac
     before=$(date +%s)
     sleep "$INTERVAL"
@@ -392,17 +573,17 @@ run)
     over=$(( $(date +%s) - before - INTERVAL ))
     if [ "$over" -gt $((INTERVAL * 2)) ]; then
       slept=$((slept + over))
-      # Re-read the lease first: one that expired during the suspend belongs to a
-      # shift that already ended, and a line landing after the foreman's handover
+      # Re-read the lease first: one that expired during the suspend belongs to
+      # a shift that already ended, and a line landing after its `shift-over`
       # is noise in the one artifact the morning is meant to read.
       if "$LEASECMD" status >/dev/null 2>&1; then
-        note "machine-slept: $((over / 60))m suspended — not counted against the foreman"
+        note info "machine-slept: $((over / 60))m suspended — not counted against the shift"
       fi
     fi
   done
   ;;
 stop)
-  if pid=$(poller_pid) && kill "$pid" 2>/dev/null; then
+  if pid=$(runner_pid) && kill "$pid" 2>/dev/null; then
     out_ok "watchdog: stopped"
   else
     out_info "watchdog: not running"

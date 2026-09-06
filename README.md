@@ -9,11 +9,11 @@ sitting overnight because the human who would have merged it was asleep.
 `factory` merges the fraction a filter can vouch for, watches the default
 branch's CI, and leaves everything with taste in it for the morning. It is four
 bash scripts, a JSON policy file and a log. Nothing stays resident past the
-lease but the poller that watches it, and there is no webhook, no service to
-sign up for, and nothing that phones anywhere.
+lease but the runner that passes under it, and there is no webhook, no service
+to sign up for, and nothing that phones anywhere.
 
 **Its failure mode is the status quo.** No lease, an expired lease, a pass that
-could not see, a foreman that died — every one of them leaves your PRs exactly
+could not see, a runner that died — every one of them leaves your PRs exactly
 where they are today: open, waiting for you.
 
 ```sh
@@ -30,8 +30,9 @@ factory shift --dry-run     # sense everything, merge nothing
 Then, when you trust what the dry run said:
 
 ```sh
-factory lease grant 12h     # authority to merge tier 1, until then
-factory shift               # one pass — loop it, or drive it from an agent
+factory lease grant 12h     # authority to merge tier 1, until then.
+                            # A runner starts with it and passes every 20 minutes
+factory shift               # or one pass by hand, any time
 ```
 
 ---
@@ -40,10 +41,10 @@ factory shift               # one pass — loop it, or drive it from an agent
 
 | | |
 |---|---|
-| `factory lease` | the standing merge grant. `grant 12h` / `status` / `revoke`. One line in a machine-local state file — so no pull request can ever grant itself authority |
+| `factory lease` | the standing merge grant. `grant 12h` / `grant indefinitely` / `status` / `revoke`. One line in a machine-local state file, so no pull request can ever grant itself authority. A grant starts the runner |
 | `factory tier` | is one PR **tier 1**, i.e. mergeable by code alone? Decided by the policy you typed, never by a model's read of the diff |
 | `factory shift` | one pass: read the budget, judge every open PR, merge tier 1 under a live lease, run your after-merge hook, report a red default branch. `--dry-run` senses and merges nothing |
-| `factory watchdog` | notice that the *foreman* died, which no pass can report. Started automatically by `lease grant` |
+| `factory watchdog` | the runner. While the lease is live it passes `factory shift` every 20 minutes, puts every red default branch through the four fixer gates, and revokes a lease whose passes stopped landing. Started by `lease grant`; `once` asks whether it is up |
 
 Plus the surface around them: `factory config print`, `factory doctor`,
 `factory skill`, `factory --help`.
@@ -52,11 +53,11 @@ Plus the surface around them: `factory config print`, `factory doctor`,
 
 | | |
 |---|---|
-| **0** | ok · tier 1 · foreman healthy · `doctor` ready with nothing to note |
+| **0** | ok · tier 1 · passes landing under the lease · `doctor` ready with nothing to note |
 | **1** | nothing (no live lease) · a pass that aborted having sensed nothing · `doctor` ready **with notes** |
 | **2** | usage, or a config that cannot be used · `doctor` blocking |
-| **3** | refused (not tier 1) · foreman stalled · a `skill install` only partly honoured |
-| **4** | a live lease with no poller watching it |
+| **3** | refused (not tier 1) · shift stalled · a `skill install` only partly honoured |
+| **4** | a live lease with no runner under it |
 
 **`doctor` is the one verb whose 1 is not a refusal**, and it is the row to
 read twice. A ready machine with something worth mentioning exits 1, and there
@@ -102,6 +103,7 @@ floor below them that no config can lower — so what it prints is what
     "commands": ["make lockfiles", "git push"]
   },
   "budget": { "mode": "metered", "feed": "~/.cache/usage.tsv" },
+  "fixer": { "command": ["my-spawn-a-lane"] },
   "notify": { "mode": "auto", "source": "factory" }
 }
 ```
@@ -156,10 +158,11 @@ write `["*"]` to drop the author test for a repo whose PRs you do not open
 yourself — the widest policy has to be one somebody typed, so an empty list is
 refused rather than read as anyone.
 
-An agent's judgement enters exactly twice, both bounded: writing the PRs in the
-first place, and deciding whether a red CI run is worth a fixer lane. Everything
-`factory shift` refuses is **queued**, never closed — the verdict and its reason
-land in the log, and the PR waits where it always has.
+An agent's judgement enters exactly once, and it is bounded: writing the PRs
+in the first place. Whether a red CI run gets a fixer lane is four checks in
+code, not a judgement (see *The runner*). Everything `factory shift` refuses is
+**queued**, never closed — the verdict and its reason land in the log, and the
+PR waits where it always has.
 
 ### The floor `tier1.deny` sits on top of
 
@@ -262,7 +265,8 @@ hours ago, which means the shift has been over since then.
 ## The budget governor
 
 Merging and sensing are `gh` calls and cost no tokens. Exactly one thing is
-throttled: **can the account afford an agent lane right now.**
+throttled: **can the account afford an agent lane right now.** The runner reads
+the answer off this line, as the last of its four fixer gates.
 
 Point `budget.feed` at a TSV whose first four columns are `5-hour %`,
 `weekly %`, `5-hour reset epoch`, `weekly reset epoch`, and every pass ends its
@@ -312,59 +316,136 @@ No quota to count? `"budget": {"mode": "unmetered"}` says so out loud, and the
 log says it too — so a feed that merely went missing can never be mistaken for a
 decision you made.
 
-## When the foreman dies
+## The runner
 
-The unknown lines above keep a pass that could not *see* from reading as a quiet
-night. The watchdog is the layer under them, and it exists because every one of
-those lines has to be written by a pass that RAN.
+`factory shift` is one pass. `factory lease grant` starts the thing that calls
+it again: `factory watchdog run`, one process per machine, alive for as long
+as the lease is. It does three things and nothing else.
 
-A foreman is usually an agent session driving a loop, and that loop continues
-only if a turn completes and schedules the next wakeup. A turn that ends in an
-error schedules nothing. Nothing is then left running, so nothing is left to
-report it: the log's last line is an ordinary `pass done: 0 merged`, and the
-lease goes on standing for hours with nobody exercising it.
+**It passes.** Every `runner.interval` (1200 seconds, 20 minutes) it runs
+`factory shift --json`, reads the events, and lets the human lines land in the
+shift log as they always have. A pass that could not see, whether
+`prs-unknown`, `tier-unknown`, `ci-unknown`, `after-merge-failed` or a
+`pass ABORTED`, gets one more pass at the next tick, five minutes later, and
+writes `pass-retry` to say so. Once. A second unknown is a line for the
+morning, not a loop. A shift that exits before it can write anything, which is
+what a config gone invalid at 2 a.m. looks like, is `pass-failed` with its
+stderr quoted.
 
-The heartbeat is the shift log's mtime, read as the **later** of that and the
-lease's own grant stamp. Two thresholds, because a blip and a death want
-different answers: at **45 minutes** quiet (`watchdog.stale`, 2700 seconds) the
-watchdog writes `foreman-stalled` and cards it once, and the lease stands; at
-**90** (`watchdog.dead`, 5400) it writes `foreman-gone` and **revokes the
-lease**, so the morning finds the ordinary human-in-the-loop workflow rather
-than a standing grant nobody is exercising.
+**It spawns fixer lanes, through four gates.** Each `CI-RED` line the pass
+printed is followed by a line saying what the runner did about it:
 
-The poll runs every `watchdog.interval` (300 seconds), and `dead` has to be
-greater than `stale`, which validation enforces at startup. The other way round
-is a watchdog that revokes a lease before it has warned anybody, and a policy
-saying so must never reach the loop and find out there. Those three are a
-`watchdog` block in the policy file, absent from the starter config for the
-reason `scope`'s two keys are: `factory config print`'s watchdog row is what is
-in force.
+| gate | the line when it refuses |
+|---|---|
+| `fixer.command` is configured | `fixer-skipped: <repo> — no fixer.command configured` |
+| no shift log holds `fixer-spawned: <repo> <head sha>` | `… a lane was already spawned for <sha>` |
+| today's log holds fewer than `fixer.cap` (2) `fixer-spawned: <repo>` lines | `… N lane(s) already today, fixer.cap is 2` |
+| the pass's budget line ended `fixer: yes` | `… budget: <the reason after fixer: no>` |
 
-They are whole numbers of seconds, checked with the budget dials and for the
-same reason. A fractional `dead` makes `[ quiet -ge dead ]` read false at every
-poll, so the death this whole layer exists to notice is never noticed — the
-quietest failure in the tool, and the only one of these that fails **open**.
-`tier1.maxLines` is checked the same way, where the equivalent slip fails closed
-and refuses every PR with a nonsense cap printed in the reason.
+All four hold, and the runner runs `fixer.command` with three words appended,
+`<repo> <default branch> <run url>`, and writes `fixer-spawned: <repo> <head
+sha>`. The command is yours: on a haus machine it opens an agent lane with the
+run URL in its prompt, and on a machine with none configured a red branch is
+reported, carded, and left alone. It has to return once the lane is started.
+It runs in the runner's turn, so a command that waits for the lane to finish
+holds every pass after it. A command that exits non-zero is `fixer-failed`
+with its stderr, and a card, because a hook you configured that cannot work is
+the same shape as `after-merge-failed`. A failed spawn counts toward neither
+the cap nor the novelty check.
 
-Both thresholds count time the poller was **awake** for. A machine that
-suspended has a stale log through nobody's fault — the watchdog was not running
-either — so the loop measures how long its own `sleep` actually took and
-subtracts the excess, writing `machine-slept` for the record. Subtracted rather
-than forgiven with a grace window: a laptop that suspends and wakes all night
-renews a grace window faster than it expires, and a genuinely dead foreman would
-keep its lease until morning.
+The novelty check reads every shift log there is, not tonight's. A head SHA is
+unique, so a fix that broke CI again does not get a third machine, and a red
+branch that stood across midnight does not get a lane a day. The cap is per
+calendar day because the log is. The fifth rule you might expect, that the
+failure be on the default branch, is answered before the runner asks:
+`factory shift` only ever queries the base branch's runs, so every `CI-RED` is
+on it by construction, and the event carries `branch` so the lane is handed a
+fact.
 
-The watchdog deliberately **does not run `factory shift` itself.** It could; the
-script is deterministic and the lease is the authority it would run under. But
-merging with no foreman means a red CI nobody reads and a `merge-failed` nobody
-retries — a factory that keeps its hands moving after its eyes have closed.
+These four gates used to be a skill: prose an agent session read on each
+wakeup, beside a retry counter. The session was the *foreman*, and this
+watchdog measured whether it was still alive. The foreman's judgement turned
+out to be four string checks and a retry counter, and a rule that is four
+string checks is code. Written here it is deterministic, `test/factory-watchdog.bats`
+has a case per gate, and no agent pane has to survive the night for a docs PR
+to merge at 3 a.m.
+
+**It notices when passes stop landing.** The heartbeat is the shift log's
+mtime, read as the later of that and the lease's own grant stamp. The runner
+writes its own lines to the same log and restores the mtime after each, so only
+a pass counts. What can make the log go quiet under a live runner is a shift
+that dies before its first line, every twenty minutes, with the lease standing,
+or one pass hanging inside a `gh` call. Two thresholds, because a blip and a
+breakdown want different answers. At **45 minutes** quiet, which is
+`watchdog.stale`, 2700 seconds, the runner writes `shift-stalled`, cards it
+once, and the lease stands. At **90**, `watchdog.dead`, 5400, it writes
+`shift-dead` and **revokes the lease**, so the morning finds the ordinary
+human-in-the-loop workflow rather than a standing grant nobody is exercising.
+A pass landing after a stall writes `shift-resumed`, and re-arms the card.
+
+The tick is `watchdog.interval` (300 seconds). Validation holds `dead` above
+`stale` and `stale` above `runner.interval`, at startup. The other way round on
+the first is a runner that revokes before it has warned anybody; on the second
+it is a runner that calls its own gap between two passes a stall, all night.
+All four are whole numbers of seconds, checked with the budget dials and for
+the same reason. A fractional `dead` makes `[ quiet -ge dead ]` read false at
+every tick, so the breakdown this layer exists to notice is never noticed. That
+is the quietest failure in the tool and the only one of these that fails
+**open**. `tier1.maxLines` is checked the same way, where the equivalent slip
+fails closed and refuses every PR with a nonsense cap printed in the reason.
+`factory config print` has a row for each block. None of them is in the starter
+config, for the reason `scope`'s two keys are not.
+
+Both thresholds count time the runner was **awake** for. A machine that
+suspended has a stale log through nobody's fault, so the loop measures how long
+its own `sleep` took and subtracts the excess, writing `machine-slept` for the
+record. Subtracted rather than forgiven with a grace window: a laptop that
+suspends and wakes all night renews a grace window faster than it expires, and
+a shift that genuinely could not run would keep its lease until morning.
+
+**What keeps the runner itself alive is not the runner.** A process can be
+lost to a reboot, a panic or an out-of-memory kill, and there is deliberately
+no second process watching for that. On a machine whose launchd owns the
+runner, `KeepAlive` restarts it and it passes again within seconds. Anywhere
+else, `factory lease grant` and `factory watchdog ensure` start one, and
+`factory watchdog once`, which `doctor` carries, says `NO RUNNER` at exit 4
+for as long as a live lease has none. A dead runner restarts instead of being
+reported, and a lease it left standing is the status quo. The lease is what
+you switch: `grant` and it runs, `revoke` and it stops, and `shift-over` is
+the log's last line when a timed lease ran out.
+
+```
+22:00 lease: tier 1 until Mon 10:00
+22:00 policy: 3f9a1c2e · factory 0.1.0
+22:00 budget: 5h 13% · week 16% · reserve 58 pts · headroom 21 pts · fixer: yes
+22:01 merged: you/docs#212 typo in the install page
+22:01 after-merge: 2 command(s) ok after 1 merge(s)
+22:01 CI-RED: you/app https://github.com/you/app/actions/runs/1
+22:01 fixer-spawned: you/app 9c2e1f0 — lane on main for https://github.com/you/app/actions/runs/1
+22:01 pass done: 1 merged
+22:21 CI-RED: you/app https://github.com/you/app/actions/runs/1
+22:21 fixer-skipped: you/app — a lane was already spawned for 9c2e1f0
+22:21 pass done: 0 merged
+```
+
+### An indefinite lease
+
+`factory lease grant indefinitely` writes a lease with no expiry. `status` says
+`indefinite · until revoked`, and `--json` carries `indefinite: true` with
+`expires` and `secondsLeft` null, so a countdown drawn off it draws "until
+revoked" rather than a number of centuries. It is allowed because the bound on
+what merges was never the clock: it is tier 1, and a policy you typed. What the
+clock bounded was how long a standing grant could outlive whoever was
+exercising it, and the runner's `shift-dead` now bounds that on its own. The
+state file spells it `never` where the epoch goes, so a reader that only knows
+epochs reports the lease unreadable and refuses to merge, rather than reading a
+sentinel as live for a century.
 
 ## Driving it from an agent
 
-`factory shift` is one pass. Something has to call it on a cadence, decide
-whether a red branch is worth a fixer, and write the handover — that is the
-**foreman**, and it is the only part with judgement in it.
+Nothing has to. A live lease runs the shift, and the log is the handover. What
+an agent still does is the verbs around it: grant the lease when asked, read
+the log in the morning, explain a refusal.
 
 ```sh
 factory skill            # the routing document for a coding agent
@@ -388,18 +469,20 @@ exits **0**. A non-zero there would have every agent on such a machine report a
 broken command and try again with more force.
 
 An agent that has the skill knows the verbs, the log vocabulary, the four
-unknown lines, and the two rules that matter: never merge outside
-`factory shift`, and never spawn a lane the budget line has not said
-`fixer: yes` to.
+unknown lines, and the rules that matter: never merge outside `factory shift`,
+never loop it while a lease is live because the runner already is, and never
+spawn a lane off a `CI-RED` line because the line after it is the runner's
+verdict on that.
 
 ## Overnight on a closed lid
 
 macOS sleeps on lid-close regardless of `caffeinate`. The lever that actually
 crosses a lid close is `sudo pmset -a disablesleep 1` (and the Mac has to be on
-power). Asleep, the loop pauses rather than stops — but "pauses" is a claim
-about the scheduler, not about the network: a wakeup that fires into an
-interface that has not reassociated is a turn that errors, and that turn is the
-end of the shift unless the watchdog is running. Both halves are needed.
+power). Asleep, the runner pauses rather than stops: its next pass lands when
+the machine wakes, the gap is written as `machine-slept`, and it is not counted
+against the shift. A pass that fires into an interface that has not
+reassociated is a pass full of unknowns, which gets its one retry at the next
+tick and is otherwise a line for the morning.
 
 ## What it deliberately does not do
 
@@ -408,8 +491,9 @@ end of the shift unless the watchdog is running. Both halves are needed.
 - **It does not write PRs.** Something else opens them; this closes the ones
   nobody needed to read.
 - **It does not phone anywhere.** No telemetry, no service, no account.
-- **It does not run headless.** A merge nobody is awake to notice is the thing
-  the watchdog exists to prevent, not a feature.
+- **It does not keep its hands moving after its eyes have closed.** The runner
+  merges with nobody watching, and that is the point, but only while its own
+  passes are landing: ninety minutes without one and the lease is revoked.
 
 ## How it looks on screen
 
@@ -428,17 +512,18 @@ turns it on for a pipe, and `dumb` beats even that.
 
 ### The card, for the report nobody is reading
 
-A shift runs while nobody is watching, so six moments are drawn as a
+A shift runs while nobody is watching, so seven moments are drawn as a
 notification as well as a log line: a pass that **aborted**, a **red default
-branch** (with the run's URL on it), an **after-merge hook that failed**, the
-**merge tally** at the end of a pass that merged something, and the watchdog's
-**stalled** and **gone**. Nothing else cards, and the two that most look like
-they should are deliberate. One unseeable repo does not, because whether that
-is worth waking somebody for is the foreman's judgement rather than a script's.
+branch** (with the run's URL on it), an **after-merge hook that failed**, a
+**fixer lane that failed to start**, the **merge tally** at the end of a pass
+that merged something, and the runner's **stalled** and **dead**. Nothing else
+cards, and the two that most look like they should are deliberate. One
+unseeable repo does not, because it gets its retry at the next tick and a
+second unknown is a line for the morning rather than a reason to wake up.
 `merge-failed` does not either: its commonest cause is the `--match-head-commit`
 pin working exactly as designed, which is a line to read in the morning and not
 a reason to wake up. Its rarer cause, an expired token, is a shift that has been
-over for hours, and the watchdog is what cards that.
+over for hours, and the runner's `shift-dead` is what cards that.
 
 `notify.mode` decides how one is sent:
 
@@ -468,11 +553,13 @@ but whether it can reach anything. A `command` that PATH cannot find blocks,
 because you typed it and it cannot work. `auto` with no trill installed, and
 `off`, are notes rather than blocks: neither is a fault, and both are worth
 saying out loud on a report about whether this machine can run a night.
+`fixer.command` gets the same two answers for the same reasons: a program PATH
+cannot find blocks, and none configured is a note.
 
 ## Development
 
 ```sh
-bats test/                                    # 202 cases
+bats test/                                    # 242 cases
 shellcheck -x bin/factory libexec/* lib/*.sh script/*.sh
 
 # The presentation cases need snug's bash half; without it they skip.

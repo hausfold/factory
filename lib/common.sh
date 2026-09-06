@@ -61,9 +61,16 @@ FACTORY_FLOOR_DENY='[
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 # Every default fails CLOSED: no repos in scope is a config error rather than a
-# quiet pass, no budget feed is `fixer: no`, and the tier filter starts at
-# docs-only. Widening any of them is the user's typed decision, in one file
-# `factory config print` reads back to them.
+# quiet pass, no budget feed is `fixer: no`, no `fixer.command` spawns nothing
+# however red a branch is, and the tier filter starts at docs-only. Widening
+# any of them is the user's typed decision, in one file `factory config print`
+# reads back to them.
+#
+# `runner.interval` is the pass cadence the runner (`factory watchdog run`)
+# keeps while a lease is live; `watchdog.stale` has to be longer than it, which
+# the validator holds. `fixer.command` is handed `<repo> <default branch> <run
+# url>` when a red default branch clears the four fixer gates, and `fixer.cap`
+# is the lanes-per-repo-per-day one of those gates counts against.
 factory_defaults() {
   cat <<'JSON'
 {
@@ -84,7 +91,9 @@ factory_defaults() {
                "fixer": 5,
                "window5hMax": 80 },
   "notify":  { "mode": "auto", "command": [], "source": "factory" },
-  "watchdog": { "stale": 2700, "dead": 5400, "interval": 300 }
+  "watchdog": { "stale": 2700, "dead": 5400, "interval": 300 },
+  "runner":  { "interval": 1200 },
+  "fixer":   { "command": [], "cap": 2 }
 }
 JSON
 }
@@ -137,7 +146,7 @@ cfgj() { factory_load; printf '%s' "$FACTORY_CFG" | jq -c "$1"; }
 factory_validate() {
   local err
   err="$(printf '%s' "$FACTORY_CFG" | jq -r '
-    [ ("scope", "tier1", "afterMerge", "budget", "notify", "watchdog") as $k
+    [ ("scope", "tier1", "afterMerge", "budget", "notify", "watchdog", "runner", "fixer") as $k
       | if (.[$k] | type) != "object" then "\($k) must be an object" else empty end
     ] | join("; ")')" || die "the policy could not be validated — jq failed reading $FACTORY_CONFIG_PATH"
   [ -z "$err" ] || die "$err  (in $FACTORY_CONFIG_PATH)"
@@ -207,12 +216,32 @@ factory_validate() {
       # Whole for the reason the budget dials are, and this is where it costs
       # most: a
       # fractional `dead` makes `[ "$quiet" -ge "$DEAD" ]` read false at every
-      # poll, so the foreman death this entire layer exists to notice is never
+      # tick, so the stalled shift this entire layer exists to notice is never
       # noticed and the lease stands until morning. That one fails OPEN, which
       # `tier1.maxLines` above does not — `[ "$churn" -le "$max" ]` refuses
       # every PR instead, with the nonsense cap printed in the reason.
       ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . != floor or . < 1)) | if length > 0 then "watchdog thresholds must be whole numbers of seconds, 1 or more" else empty end),
-      (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end)
+      (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end),
+      # The pass cadence, read by the same shell arithmetic the watchdog
+      # thresholds are, so whole for the same reason: a fractional interval makes
+      # `[ $((now - last)) -ge "$RUNNER_INTERVAL" ]` read false at every tick,
+      # and a runner that never finds a pass due is a live lease nobody is
+      # exercising — the standing grant this whole layer exists to take away.
+      (if (.runner.interval | type) != "number" or .runner.interval != (.runner.interval | floor) or .runner.interval < 1 then "runner.interval must be a whole number of seconds, 1 or more" else empty end),
+      # The stall threshold has to sit OUTSIDE the cadence, or every gap
+      # between two passes is a stall: a `shift-stalled` line and a card
+      # before each pass, then `shift-resumed` after it, all night. And with
+      # `dead` inside the cadence too, the runner revokes its own lease
+      # between two passes it was about to run.
+      (if (.runner.interval | type) == "number" and (.watchdog.stale | type) == "number" and .watchdog.stale <= .runner.interval then "watchdog.stale must be greater than runner.interval — a stall threshold inside the pass cadence is a stall between every two passes" else empty end),
+      # Same argv contract as notify.command, and the same two refusals: a
+      # string where the list goes, and a first word with no program in it.
+      (if (.fixer.command | type) != "array" then "fixer.command must be an array of argv words, not a string" else empty end),
+      (if (.fixer.command | type) == "array" and (.fixer.command | length) > 0 and ((.fixer.command[0] | type) != "string" or (.fixer.command[0] | length) == 0) then "fixer.command starts with an empty word — there is no program there to run" else empty end),
+      # Read back with `-ge` against a count of log lines, so whole; 0 is a
+      # legal way to spell "report the red, spawn nothing", and it is logged
+      # as the reason on every skip.
+      (if (.fixer.cap | type) != "number" or .fixer.cap != (.fixer.cap | floor) or .fixer.cap < 0 then "fixer.cap must be a whole number of lanes per repo per day, 0 or more" else empty end)
     ] | join("; ")')" || die "the policy could not be validated — jq failed reading $FACTORY_CONFIG_PATH"
   [ -z "$err" ] || die "$err  (in $FACTORY_CONFIG_PATH)"
 }

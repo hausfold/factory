@@ -15,6 +15,8 @@
 # running a test suite is never a reason to take it. The stub also records its
 # calls, which makes the notify POLICY testable — see the pair of cases on it.
 
+bats_require_minimum_version 1.5.0   # `run --separate-stderr`, for the event cases
+
 setup() {
   TMP="$BATS_TEST_TMPDIR"
   # A throwaway tree. `factory-shift` resolves its siblings by path
@@ -123,8 +125,8 @@ case "\$1 \$2" in
 "run list")
   case "$2" in
   fail) echo "http2: client conn could not be established" >&2; exit 1 ;;
-  red)  printf 'failure\thttps://example.invalid/run/1\n' ;;
-  *)    printf 'success\thttps://example.invalid/run/1\n' ;;
+  red)  printf 'failure\thttps://example.invalid/run/1\t9c2e1f0\n' ;;
+  *)    printf 'success\thttps://example.invalid/run/1\t9c2e1f0\n' ;;
   esac
   ;;
 esac
@@ -169,6 +171,22 @@ stub_tier() {
   run "$SHIFT" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"CI-RED: hausfold/perch"* ]]
+}
+
+# The runner's fixer gates read the `ci-red` EVENT: `head` is what "never a
+# second lane for the same failure" is counted on, and `branch` is what the
+# lane is handed. Both ride in the event and neither is in the human line,
+# which stays the one unbreakable URL it always was.
+@test "a ci-red event carries the run's head SHA and the branch, for the runner's gates" {
+  stub_gh ok red none
+  run --separate-stderr "$SHIFT" --dry-run --json
+  [ "$status" -eq 0 ]
+  local ev
+  ev=$(jq -c 'select(.event == "ci-red")' <<<"$output")
+  [ "$(jq -r .repo <<<"$ev")" = hausfold/perch ]
+  [ "$(jq -r .head <<<"$ev")" = 9c2e1f0 ]
+  [ "$(jq -r .branch <<<"$ev")" = main ]
+  [ "$(jq -r .url <<<"$ev")" = https://example.invalid/run/1 ]
 }
 
 @test "a PR that WAS judged and refused is still queued, with its reason" {
@@ -400,6 +418,31 @@ EOF
   [[ "$output" == *"fixer: yes"* ]]
 }
 
+# The verdict's reason is a FIELD of the budget event, so the runner's
+# `fixer-skipped: … budget — <why>` quotes it without parsing the human line.
+# Every `fixer: false` arm carries one.
+@test "a budget refusal carries its reason in the event, and an affirmative carries none" {
+  stub_usage 90 16 $((604800 * 84 / 100))
+  run --separate-stderr "$SHIFT" --dry-run --json
+  local ev
+  ev=$(jq -c 'select(.event == "budget")' <<<"$output")
+  [ "$(jq -r .fixer <<<"$ev")" = false ]
+  [ "$(jq -r .reason <<<"$ev")" = "5h window at 90%" ]
+
+  stub_usage 10 16 $((604800 * 84 / 100))
+  run --separate-stderr "$SHIFT" --dry-run --json
+  ev=$(jq -c 'select(.event == "budget")' <<<"$output")
+  [ "$(jq -r .fixer <<<"$ev")" = true ]
+  [ "$(jq -r .reason <<<"$ev")" = null ]
+
+  # The unknown arms too: an unreadable quota names itself.
+  rm -f "$TMP/usage.tsv"
+  run --separate-stderr "$SHIFT" --dry-run --json
+  ev=$(jq -c 'select(.event == "budget")' <<<"$output")
+  [ "$(jq -r .fixer <<<"$ev")" = false ]
+  [[ "$(jq -r .reason <<<"$ev")" == "no usage feed at "* ]]
+}
+
 @test "a saturated 5-hour window refuses however much of the week is left" {
   # Not the same question as the week, and it outranks it: a factory that
   # saturates the rolling window at 4am rate-limits whoever sits down at 9.
@@ -574,8 +617,9 @@ EOF
   run "$SHIFT" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"tier-unknown: hausfold/perch#7"* ]]
-  # The expensive collapse: the nightshift skill tells the foreman that queued
-  # rows need nothing, so an unjudged PR filed as queued is one nobody revisits.
+  # The expensive collapse: `queued` rows need nothing by design — the skill
+  # says so — so an unjudged PR filed as queued is one nobody revisits, and one
+  # the runner never retries either, since only the unknown lines earn a retry.
   [[ "$output" != *"queued: hausfold/perch#7"* ]]
 }
 

@@ -243,12 +243,81 @@ expires_in() {
   [ "$left" -le 90 ] || fail "90s granted ${left}s"
 }
 
+# ── indefinitely ──────────────────────────────────────────────────────────────
+# A lease with no expiry. Allowed because the bound on what merges was never
+# the clock — it is tier 1 — and what the clock bounded, a standing grant
+# outliving whoever exercised it, the runner's `shift-dead` now bounds on its
+# own. The state file spells it `never`, a word rather than a sentinel epoch,
+# so a reader that only knows epochs fails closed on it.
+
+@test "grant indefinitely is accepted, and status says so" {
+  run "$LEASECMD" grant indefinitely
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"lease: tier 1 indefinitely"* ]]
+  [[ "$output" == *"until revoked"* ]]
+  [ "$(cut -f1 "$FACTORY_STATE_DIR/lease")" = never ]
+  run "$LEASECMD" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"lease: tier 1 · indefinite · until revoked"* ]]
+}
+
+@test "status --json on an indefinite lease carries nulls, not a century" {
+  # A caller drawing a countdown off `secondsLeft` should draw "until revoked"
+  # and never a number of years — so both the expiry and the countdown are
+  # null, and `indefinite` is the field to branch on.
+  "$LEASECMD" grant indefinitely >/dev/null
+  run "$LEASECMD" status --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .live <<<"$output")" = true ]
+  [ "$(jq -r .indefinite <<<"$output")" = true ]
+  [ "$(jq -r .expires <<<"$output")" = null ]
+  [ "$(jq -r .secondsLeft <<<"$output")" = null ]
+  [ "$(jq -r .granted <<<"$output")" -gt 0 ]
+}
+
+@test "a timed lease says indefinite: false, so the field is always there to branch on" {
+  lease_expiring 3600
+  run "$LEASECMD" status --json
+  [ "$(jq -r .indefinite <<<"$output")" = false ]
+  [ "$(jq -r .secondsLeft <<<"$output")" -gt 0 ]
+}
+
+@test "revoke ends an indefinite lease the way it ends a timed one" {
+  "$LEASECMD" grant indefinitely >/dev/null
+  run "$LEASECMD" revoke
+  [ "$status" -eq 0 ]
+  [ ! -f "$FACTORY_STATE_DIR/lease" ]
+  run "$LEASECMD" status
+  [ "$status" -eq 1 ]
+}
+
+@test "only the one word is the indefinite grant — a near miss is a bad duration, not a lease" {
+  for w in indefinite forever never always; do
+    run "$LEASECMD" grant "$w"
+    [ "$status" -eq 2 ] || fail "grant $w exited $status, not 2: $output"
+    [[ "$output" == *"bad duration"* ]] || fail "grant $w: $output"
+    [ ! -s "$FACTORY_STATE_DIR/lease" ] || fail "grant $w wrote a lease"
+  done
+}
+
+@test "a state file spelling anything but an epoch or never is unreadable, and unreadable is not live" {
+  # The fail-closed half of choosing a word: a reader that does not know it
+  # reports the lease unreadable, which is exit 1 and "may not merge".
+  printf 'indefinitely\t1\t%s\n' "$(date +%s)" >"$FACTORY_STATE_DIR/lease"
+  run "$LEASECMD" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"lease: unreadable"* ]]
+}
+
 # ── tier ──────────────────────────────────────────────────────────────────────
 
 @test "a grant naming a tier other than 1 is refused" {
   run "$LEASECMD" grant 12h 2
   [ "$status" -eq 2 ]
   [[ "$output" == *"only tier 1 exists"* ]]
+  [ ! -s "$FACTORY_STATE_DIR/lease" ]
+  run "$LEASECMD" grant indefinitely 2
+  [ "$status" -eq 2 ]
   [ ! -s "$FACTORY_STATE_DIR/lease" ]
 }
 
