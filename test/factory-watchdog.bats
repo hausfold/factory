@@ -311,15 +311,20 @@ runner_count_is() {
   [ "$(shift_calls)" -le 4 ]
 }
 
-@test "a runner that never saw a lease adds nothing to the log" {
+@test "a runner that never saw a lease says so on fd 1, and adds nothing to the log" {
   # Started after the expiry — launchd restarting it, or `ensure` racing a
-  # revoke. Nothing passed, so nothing is over.
+  # revoke. Nothing passed, so nothing is over and the log gains nothing. The
+  # line is still owed: under launchd this is the exit taken every throttle
+  # interval for as long as nobody has granted anything, and a silent one
+  # leaves `launchctl list` reading the same for an idle runner and a broken
+  # one.
   lease 1 3600
   log_aged 60
   sleep 2
-  run "$WD" run
+  run --separate-stderr "$WD" run
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [[ "$output" == *"no live lease"* ]]
+  [ -z "$stderr" ]
   ! grep -q "shift-over" "$(today_log)"
   [ "$(shift_calls)" -eq 0 ]
 }

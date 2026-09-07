@@ -536,11 +536,24 @@ run)
     fi
     case "$rc" in
     1)
-      # The lease ended. A runner that passed under it says so, once, so the
-      # log's last line is the end of the shift and not merely its last pass;
-      # one that never saw a lease — started after the expiry, or racing a
-      # revoke — has nothing to add. No lease, so `note` restores nothing.
-      [ "$passes" -eq 0 ] || note info "shift-over: lease ended — $passes pass(es) this run"
+      # The lease ended. A runner that passed under it says so in the log,
+      # once, so the log's last line is the end of the shift and not merely
+      # its last pass. No lease, so `note` restores nothing.
+      #
+      # One that never saw a lease — started after the expiry, or racing a
+      # revoke — has nothing for the LOG, since nothing passed and so nothing
+      # is over. It still owes a line on fd 1. Under launchd this is the
+      # ORDINARY exit rather than the rare one: `KeepAlive` starts the runner
+      # again every throttle interval for as long as nobody has granted
+      # anything, and its stdout is the only window onto a process nobody
+      # watched start. Silent, `launchctl list` shows `-  0` whether the
+      # runner is idle for want of a lease or exiting on a bug, and an empty
+      # log is exactly the claim this refuses to make.
+      if [ "$passes" -eq 0 ]; then
+        out_info "watchdog: no live lease — nothing to run"
+      else
+        note info "shift-over: lease ended — $passes pass(es) this run"
+      fi
       exit 0
       ;;
     3)
