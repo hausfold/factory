@@ -410,7 +410,10 @@ runner, `KeepAlive` restarts it and it passes again within seconds. Anywhere
 else, `factory lease grant` and `factory watchdog ensure` start one, and
 `factory watchdog once`, which `doctor` carries, says `NO RUNNER` at exit 4
 for as long as a live lease has none. A dead runner restarts instead of being
-reported, and a lease it left standing is the status quo. The lease is what
+reported, and a lease it left standing is the status quo. A runner that starts
+without a live lease says `no live lease` on fd 1 and exits, which is why the
+launchd log of a machine nobody has granted anything reads as idle rather than
+as empty, and empty is what a crash looks like too. The lease is what
 you switch: `grant` and it runs, `revoke` and it stops, and `shift-over` is
 the log's last line when a timed lease ran out.
 
