@@ -2,9 +2,9 @@
 
 **Merge the pull requests code alone can vouch for, while nobody is watching.**
 
-On an ordinary week a small org lands ~100 PRs, and every one of them waits for
-a person to press merge. Most of that waiting is not review — it is a docs typo
-sitting overnight because the human who would have merged it was asleep.
+On an ordinary week a small org lands ~100 PRs, and most of what waits for a
+person to press merge is not review. It is a docs typo sitting overnight
+because whoever would have merged it was asleep.
 
 `factory` merges the fraction a filter can vouch for, watches the default
 branch's CI, and leaves everything with taste in it for the morning. It is four
@@ -79,7 +79,10 @@ One file, machine-local, at `factory config path`
 (`~/.config/factory/config.json`, or `$FACTORY_CONFIG`). `factory config print`
 shows the **effective** policy — your file merged over the defaults, plus the
 floor below them that no config can lower — so what it prints is what
-`factory tier` will actually do.
+`factory tier` will actually do. The example below is the shape you edit and
+not the key set: the further keys under `scope`, `budget`, `fixer`,
+`watchdog`, `runner` and `notify` are absent from it and all on
+`config print`.
 
 ```json
 {
@@ -159,8 +162,9 @@ yourself — the widest policy has to be one somebody typed, so an empty list is
 refused rather than read as anyone.
 
 An agent's judgement enters exactly once, and it is bounded: writing the PRs
-in the first place. Whether a red CI run gets a fixer lane is four checks in
-code, not a judgement (see *The runner*). Everything `factory shift` refuses is
+in the first place. `factory` opens none; it closes the ones nobody needed to
+read. Whether a red CI run gets a fixer lane is four checks in code, not a
+judgement (see *The runner*). Everything `factory shift` refuses is
 **queued**, never closed — the verdict and its reason land in the log, and the
 PR waits where it always has.
 
@@ -286,15 +290,15 @@ the week runs off, so the reserve right now is
 `ceiling` (95; the top five points are nobody's) is the factory's to spend, and
 a lane needs `fixer` (5) points of it.
 
-Those four are the whole dial set, they are absent from the starter config for
-the reason `scope`'s two keys are, and each is a **whole** number of percentage
-points between 0 and 100. The wholeness is checked at startup rather than left
-to taste, because the arithmetic behind the verdict is shell integer arithmetic
-and a fraction there does not raise its voice: `70.5` fails the arithmetic and
-takes the entire `budget:` line out of the log, leaving a pass that ends clean
-on the output a quiet night makes, and `80.5` is a comparison that reads false —
-retiring the condition that outranks the other one. Neither is a crash, which is
-why neither could be left to be discovered at 3 a.m.
+Those four are the whole dial set, and each is a **whole** number of
+percentage points between 0 and 100. The wholeness is checked at startup
+rather than left to taste, because the arithmetic behind the verdict is shell
+integer arithmetic and a fraction there does not raise its voice: `70.5` fails
+the arithmetic and takes the entire `budget:` line out of the log, leaving a
+pass that ends clean on the output a quiet night makes, and `80.5` is a
+comparison that reads false — retiring the condition that outranks the other
+one. Neither is a crash, which is why neither could be left to be discovered
+at 3 a.m.
 
 The question is **forward-looking**, and that is the load-bearing part. "Is the
 week spent no faster than the clock so far" is a question nobody has, and it
@@ -362,13 +366,9 @@ failure be on the default branch, is answered before the runner asks:
 on it by construction, and the event carries `branch` so the lane is handed a
 fact.
 
-These four gates used to be a skill: prose an agent session read on each
-wakeup, beside a retry counter. The session was the *foreman*, and this
-watchdog measured whether it was still alive. The foreman's judgement turned
-out to be four string checks and a retry counter, and a rule that is four
-string checks is code. Written here it is deterministic, `test/factory-watchdog.bats`
-has a case per gate, and no agent pane has to survive the night for a docs PR
-to merge at 3 a.m.
+All four are code rather than prose an agent re-reads, so they are
+deterministic and `test/factory-watchdog.bats` has a case per gate. No agent
+pane has to survive the night for a docs PR to merge at 3 a.m.
 
 **It notices when passes stop landing.** The heartbeat is the shift log's
 mtime, read as the later of that and the lease's own grant stamp. The runner
@@ -393,8 +393,7 @@ every tick, so the breakdown this layer exists to notice is never noticed. That
 is the quietest failure in the tool and the only one of these that fails
 **open**. `tier1.maxLines` is checked the same way, where the equivalent slip
 fails closed and refuses every PR with a nonsense cap printed in the reason.
-`factory config print` has a row for each block. None of them is in the starter
-config, for the reason `scope`'s two keys are not.
+`factory config print` has a row for each block.
 
 Both thresholds count time the runner was **awake** for. A machine that
 suspended has a stale log through nobody's fault, so the loop measures how long
@@ -402,6 +401,14 @@ its own `sleep` took and subtracts the excess, writing `machine-slept` for the
 record. Subtracted rather than forgiven with a grace window: a laptop that
 suspends and wakes all night renews a grace window faster than it expires, and
 a shift that genuinely could not run would keep its lease until morning.
+Asleep, the runner pauses rather than stops, and the first pass after a wake
+can fire into an interface that has not reassociated — a pass full of
+unknowns, which takes the one `pass-retry` above and is otherwise a line for
+the morning.
+
+Staying awake at all is the OS's business and not this tool's. macOS sleeps
+on lid-close regardless of `caffeinate`, and the lever that crosses one is
+`sudo pmset -a disablesleep 1`, on power.
 
 **What keeps the runner itself alive is not the runner.** A process can be
 lost to a reboot, a panic or an out-of-memory kill, and there is deliberately
@@ -473,30 +480,9 @@ broken command and try again with more force.
 
 An agent that has the skill knows the verbs, the log vocabulary, the four
 unknown lines, and the rules that matter: never merge outside `factory shift`,
-never loop it while a lease is live because the runner already is, and never
+never loop it under a live lease because the runner already is, and never
 spawn a lane off a `CI-RED` line because the line after it is the runner's
-verdict on that.
-
-## Overnight on a closed lid
-
-macOS sleeps on lid-close regardless of `caffeinate`. The lever that actually
-crosses a lid close is `sudo pmset -a disablesleep 1` (and the Mac has to be on
-power). Asleep, the runner pauses rather than stops: its next pass lands when
-the machine wakes, the gap is written as `machine-slept`, and it is not counted
-against the shift. A pass that fires into an interface that has not
-reassociated is a pass full of unknowns, which gets its one retry at the next
-tick and is otherwise a line for the morning.
-
-## What it deliberately does not do
-
-- **It does not decide what to merge with a model.** The filter is the whole
-  definition of tier 1.
-- **It does not write PRs.** Something else opens them; this closes the ones
-  nobody needed to read.
-- **It does not phone anywhere.** No telemetry, no service, no account.
-- **It does not keep its hands moving after its eyes have closed.** The runner
-  merges with nobody watching, and that is the point, but only while its own
-  passes are landing: ninety minutes without one and the lease is revoked.
+verdict on that one.
 
 ## How it looks on screen
 
@@ -510,8 +496,9 @@ for you.
 
 **snug is an input, not a dependency.** The clone-and-symlink install above has
 no `FACTORY_UI_SH` and prints the same reports with the same marks, unpainted.
-`NO_COLOR`, a pipe and `TERM=dumb` each turn the colour off; `CLICOLOR_FORCE=1`
-turns it on for a pipe, and `dumb` beats even that.
+Where it is painting, `NO_COLOR`, `CLICOLOR_FORCE=1`, `TERM=dumb` and a pipe
+do what snug's [README](https://github.com/hausfold/snug) says they do,
+because snug is what reads them.
 
 ### The card, for the report nobody is reading
 
@@ -521,12 +508,10 @@ branch** (with the run's URL on it), an **after-merge hook that failed**, a
 **fixer lane that failed to start**, the **merge tally** at the end of a pass
 that merged something, and the runner's **stalled** and **dead**. Nothing else
 cards, and the two that most look like they should are deliberate. One
-unseeable repo does not, because it gets its retry at the next tick and a
-second unknown is a line for the morning rather than a reason to wake up.
-`merge-failed` does not either: its commonest cause is the `--match-head-commit`
-pin working exactly as designed, which is a line to read in the morning and not
-a reason to wake up. Its rarer cause, an expired token, is a shift that has been
-over for hours, and the runner's `shift-dead` is what cards that.
+unseeable repo does not: it gets its retry, and a second unknown is a line for
+the morning rather than a reason to wake up. `merge-failed` does not either:
+neither cause above is a reason to wake up, and the one that means the shift
+has been over for hours, an expired token, is what `shift-dead` cards.
 
 `notify.mode` decides how one is sent:
 
@@ -547,9 +532,6 @@ cost the pass nothing and say nothing. Which is why `mode: "command"` with an
 empty `notify.command` is refused at startup instead of running as a quiet
 no-op: silence is what a working night looks like too, so that config is
 indistinguishable from a healthy one until the morning you needed the card.
-
-`notify.command` is not in the starter config either. The example is the shape
-you edit; `factory config print`'s notify row is what is in force.
 
 `factory doctor` asks the other half of the question: not what is configured
 but whether it can reach anything. A `command` that PATH cannot find blocks,
