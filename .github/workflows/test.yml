@@ -45,6 +45,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Let a branch be checked on demand (e.g. before opening a PR) without
+  # having to push to main first.
+  workflow_dispatch:
 
 # A second push to a PR branch makes the first run's answer worthless, and the
 # abandoned run still holds a runner — a runner the next PR then waits
