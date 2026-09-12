@@ -43,8 +43,16 @@ name: Tests
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
+
+# A second push to a PR branch makes the first run's answer worthless, and the
+# abandoned run still holds a runner — on the macOS ones, a queue slot the next
+# PR then waits behind. Only PR runs cancel: a push to main is a distinct commit
+# whose tick someone may need to read back.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -53,11 +61,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # jq is named rather than assumed present: the tier filter IS a jq
-      # program and the config layer is another, so a runner image that dropped
-      # it would turn every case into an error rather than a failure.
-      - name: Install bats + shellcheck + jq
-        run: sudo apt-get update && sudo apt-get install -y bats shellcheck jq
+      # bats is the one tool of the three the ubuntu-latest image lacks, and
+      # npm is preinstalled, so it comes from npm rather than apt. shellcheck
+      # and jq are already on the image; `apt-get update` in front of them
+      # bought nothing and, on the day the Azure mirrors go quiet, hangs rather
+      # than fails (haus/check.yml has the long version of that afternoon).
+      #
+      # jq is still named rather than assumed: the tier filter IS a jq program
+      # and the config layer is another, so an image that dropped it would turn
+      # every case into an error rather than a failure. The version print below
+      # is what makes that loud instead of confusing.
+      - name: Install bats
+        run: sudo npm install -g bats
+      - name: jq is on this image
+        run: jq --version
 
       # The versions are printed because they are not pinned, and apt's
       # shellcheck disagrees with a newer one about which checks are on by
