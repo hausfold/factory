@@ -29,11 +29,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789212138,
-        "narHash": "sha256-BSom2QFvAYfppgcp6WBGgZgw6xFkraavIJpkKDwmy4c=",
+        "lastModified": 1789464076,
+        "narHash": "sha256-O0ZZjeCYPJbHGPdFoBfp+qJuZvpPekqs8KuR9PBOjZk=",
         "owner": "hausfold",
         "repo": "snug",
-        "rev": "aa5ad6329a6fe37ed522066172a8fced5a507556",
+        "rev": "1fb427d011028a68e92243d1752473fb65e75e1c",
         "type": "github"
       },
       "original": {
