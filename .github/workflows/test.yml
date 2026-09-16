@@ -64,6 +64,49 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ONE job, and measured that way rather than assumed. The arithmetic is here
+  # so the next reader does not redo it.
+  #
+  # Five PR runs, read 2026-09-16: the job is 129s and its `bats` step is 118s
+  # of that. Every other step is 4s or less, and the ~11s left over is what a
+  # Linux job costs around the steps that do its work.
+  #
+  # The step's own anatomy, from the per-line timestamps in
+  # `gh api repos/hausfold/factory/actions/jobs/<id>/logs` (means of the five):
+  #
+  #     factory-watchdog  88s      agent-surface   7s
+  #     factory-shift     11s      factory-lease   3s
+  #     factory-tier       7s      presentation    1s
+  #
+  # The need boundary this step list already carries is the snug checkout
+  # above, which only `agent-surface` and `presentation` read. Cut there, the
+  # painter half is 9s of bats and the half left behind is 110s — a 121s job
+  # against today's 129s. Eight seconds, for a whole extra runner request, and
+  # it fails both tests a split has to pass: the painter half is under the ~11s
+  # a job costs, so it has not earned one and joins this one; and 8s is the
+  # whole of a 100s spread, which is all a split is ever worth.
+  #
+  # So there is nothing to group, and the 122s is `test/factory-watchdog.bats`:
+  # 88s, three quarters of the step. 55s of that 88 is wall clock ON PURPOSE.
+  #
+  #   - 36s is the two `⚠ … suspend …` cases. They stub `sleep` so the clock
+  #     jumps, because awake-seconds and wall-seconds can only be told apart by
+  #     letting the wall clock pass. The tell that this is a clock and not a
+  #     cost: a Mac 2.8x slower than the runner on every other suite runs those
+  #     two in 35s against the runner's 36.
+  #   - 19s is seven `sleep 2`/`sleep 3` waits proving nothing MORE was logged.
+  #     A wait for an absence cannot poll.
+  #
+  # Both sets of numbers were tuned against failures on loaded machines, and
+  # the comment at each case says which failure. Shortening them buys seconds
+  # and spends flakes. The remaining ~33s is 61 cases forking, spread evenly —
+  # nothing to lift out.
+  #
+  # One thing this gate does NOT have, checked because haus did: no step is
+  # held open past its last `ok`. Summed per-case timestamps come to 118.1s
+  # against the step's own 117.8s, so nothing detached here outlives the
+  # harness still holding its descriptor. `fake_runner`'s `sleep 30` is the
+  # candidate; it is killed.
   test:
     name: bats + shellcheck + skill guards
     runs-on: ubuntu-latest
