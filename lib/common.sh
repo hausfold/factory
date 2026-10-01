@@ -64,13 +64,7 @@ FACTORY_FLOOR_DENY='[
 # quiet pass, no budget feed is `fixer: no`, no `fixer.command` spawns nothing
 # however red a branch is, and the tier filter starts at docs-only. Widening
 # any of them is the user's typed decision, in one file `factory config print`
-# reads back to them.
-#
-# `runner.interval` is the pass cadence the runner (`factory watchdog run`)
-# keeps while a lease is live; `watchdog.stale` has to be longer than it, which
-# the validator holds. `fixer.command` is handed `<repo> <default branch> <run
-# url>` when a red default branch clears the four fixer gates, and `fixer.cap`
-# is the lanes-per-repo-per-day one of those gates counts against.
+# reads back to them. What each dial means is the README's.
 factory_defaults() {
   cat <<'JSON'
 {
@@ -214,12 +208,11 @@ factory_validate() {
       # headroom the account does not have.
       ([.budget.ceiling, .budget.reserve, .budget.fixer, .budget.window5hMax] | map(select(type != "number" or . != floor or . < 0 or . > 100)) | if length > 0 then "budget thresholds must be whole numbers of percentage points, 0-100" else empty end),
       # Whole for the reason the budget dials are, and this is where it costs
-      # most: a
-      # fractional `dead` makes `[ "$quiet" -ge "$DEAD" ]` read false at every
-      # tick, so the stalled shift this entire layer exists to notice is never
-      # noticed and the lease stands until morning. That one fails OPEN, which
-      # `tier1.maxLines` above does not — `[ "$churn" -le "$max" ]` refuses
-      # every PR instead, with the nonsense cap printed in the reason.
+      # most: a fractional `dead` makes `[ "$quiet" -ge "$DEAD" ]` read false
+      # at every tick, so the stalled shift this entire layer exists to notice
+      # is never noticed and the lease stands until morning. That one fails
+      # OPEN, which `tier1.maxLines` above does not — `[ "$churn" -le "$max" ]`
+      # refuses every PR instead, with the nonsense cap printed in the reason.
       ([.watchdog.stale, .watchdog.dead, .watchdog.interval] | map(select(type != "number" or . != floor or . < 1)) | if length > 0 then "watchdog thresholds must be whole numbers of seconds, 1 or more" else empty end),
       (if .watchdog.dead <= .watchdog.stale then "watchdog.dead must be greater than watchdog.stale" else empty end),
       # The pass cadence, read by the same shell arithmetic the watchdog
